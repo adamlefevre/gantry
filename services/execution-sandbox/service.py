@@ -13,8 +13,6 @@ sandbox_image = (
     .pip_install(
         "pytest>=8.0.0",
         "ruff>=0.4.0",
-        "duckdb>=1.0.0",
-        "boto3>=1.34.0",
     )
 )
 

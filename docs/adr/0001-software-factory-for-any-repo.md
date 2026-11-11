@@ -40,7 +40,7 @@ The goal is a factory: label an issue in any repo and get back a verified PR.
 
 5. **The lakehouse becomes the factory's analytics store.**
    - Task telemetry is written to R2 as Parquet, compacted by the existing pipeline, and queried with DuckDB.
-   - Gantry is the first repo the factory works on.
+   - Gantry is the first repo the factory works on. (Superseded by ADR 0003: the lakehouse moved to gantry-lakehouse, which is now the first target repo.)
 
 ## Consequences
 
