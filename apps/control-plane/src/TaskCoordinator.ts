@@ -17,8 +17,8 @@ export interface Env {
   GITHUB_API_URL?: string;
   /** Optional token for the GitHub API. Step 3 replaces it with a GitHub App installation token. */
   GITHUB_TOKEN?: string;
-  // Test/mock hooks
-  MODEL_OVERRIDE?: any;
+  /** Gemini API base URL. Defaults to Google's; the tests point it at the mock Gemini server. */
+  GOOGLE_GENERATIVE_AI_BASE_URL?: string;
 }
 
 export interface TaskRecord {
@@ -199,7 +199,6 @@ export class TaskCoordinator extends DurableObject<Env> {
         prompt,
         taskId,
         repo,
-        modelOverride: this.env.MODEL_OVERRIDE,
         onConfig: (config, verification) => {
           this.sql.exec(
             `UPDATE tasks SET verification = ?, test_command = ?, updated_at = ? WHERE id = ?`,

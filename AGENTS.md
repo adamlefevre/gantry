@@ -40,7 +40,7 @@ gantry/
 - Worker secrets go through `wrangler secret put` (or `.dev.vars` locally); sandbox secrets through `modal.Secret`. Model API keys stay in the Worker and never reach the sandbox.
 - The control plane writes to R2 only through the `GANTRY_BUCKET` binding, and only under `telemetry/` (see `docs/telemetry.md`).
 - Target-repo content (issues, `.gantry.yml`, code) is untrusted. It runs only inside the sandbox.
-- Tests stay offline: Miniflare plus the mock Modal and GitHub servers. No test may call a real external service.
+- Tests stay offline: Miniflare plus the mock Modal, GitHub and Gemini servers. No test may call a real external service.
 
 ## Agent skills
 
