@@ -11,7 +11,7 @@ help:
 	@echo "  make ingest       - Stream NYC Taxi parquet sample into R2 via DuckDB"
 	@echo "  make compact      - Run partition bin-packing & compaction locally"
 	@echo "  make test         - Run ephemeral integration tests"
-	@echo "  make modal-test   - Dry-run scheduled compaction on Modal"
+	@echo "  make modal-test   - Run scheduled compaction once on Modal (real bucket; deletes source files)"
 	@echo "  make modal-deploy - Deploy cron compaction and sandbox API to Modal"
 	@echo "  make clean        - Delete the R2 bucket"
 
@@ -38,7 +38,7 @@ test:
 	pytest tests/test_compaction.py -v -s
 
 modal-test:
-	@echo "==> Running ephemeral dry-run in Modal..."
+	@echo "==> Running scheduled compaction once on Modal (real bucket)..."
 	modal run jobs/scheduled_compaction.py
 
 modal-deploy:

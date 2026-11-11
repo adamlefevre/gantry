@@ -1,0 +1,10 @@
+{
+  "name": "gantry-workspace",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "test": "npm --prefix apps/control-plane run test"
+  }
+}

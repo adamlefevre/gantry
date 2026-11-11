@@ -5,7 +5,8 @@ image = (
     .pip_install(
         "duckdb>=1.0.0",
         "boto3>=1.34.0",
-        "botocore>=1.34.0"
+        "botocore>=1.34.0",
+        "python-dotenv>=1.0.0",  # pipelines/compact.py imports it at module load
     )
     .add_local_python_source("pipelines")
 )
