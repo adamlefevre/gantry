@@ -1,19 +1,25 @@
 {
-  "name": "control-plane",
+  "name": "gantry-control-plane",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "test": "vitest run"
   },
   "dependencies": {
-    "@ai-sdk/google": "^0.0.50",
-    "ai": "^3.3.0",
-    "zod": "^3.23.8"
+    "@ai-sdk/google": "^1.1.0",
+    "ai": "^4.1.0",
+    "yaml": "^2.9.1",
+    "zod": "^3.24.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20240909.0",
-    "typescript": "^5.5.4",
-    "wrangler": "^3.78.0"
+    "@cloudflare/workers-types": "^4.20250224.0",
+    "@types/node": "^20.17.0",
+    "miniflare": "^3.20250204.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "wrangler": "^3.100.0"
   }
 }

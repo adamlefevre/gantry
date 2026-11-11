@@ -1,4 +1,4 @@
-name: Lakehouse CI
+name: Control plane CI
 
 on:
   push:
@@ -7,31 +7,25 @@ on:
     branches: [ main ]
 
 jobs:
-  integration-tests:
+  control-plane:
     runs-on: ubuntu-latest
-    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
-
-    env:
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Node
+        uses: actions/setup-node@v4
         with:
-          python-version: "3.11"
-          cache: "pip"
+          node-version: "22"
+          cache: "npm"
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+        run: npm ci
 
-      - name: Run Lakehouse Compaction & Parity Integration Tests
-        run: |
-          pytest tests/test_compaction.py -v --tb=short
+      - name: Type-check
+        run: npx tsc --noEmit
+        working-directory: apps/control-plane
+
+      - name: Run offline tests (Vitest + Miniflare)
+        run: npm test

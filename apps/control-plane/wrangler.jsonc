@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gantry-control-plane",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-03-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "TASK_COORDINATOR",
+        "class_name": "TaskCoordinator"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["TaskCoordinator"]
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "GANTRY_BUCKET",
+      "bucket_name": "gantry"
+    }
+  ],
+  // Secrets (set with `npx wrangler secret put <NAME>`, or in .dev.vars for `wrangler dev`):
+  //   AGENT_SANDBOX_TOKEN, GOOGLE_GENERATIVE_AI_API_KEY
+  "vars": {
+    "MODAL_SANDBOX_URL": "https://<your-modal-workspace>--sandbox-service.modal.run"
+  }
+}
