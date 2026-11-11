@@ -3,10 +3,12 @@ import { Miniflare } from "miniflare";
 import esbuild from "esbuild";
 import { MockModalServer } from "./mock-modal-server";
 import { MockGitHubServer } from "./mock-github-server";
+import { MockGeminiServer, toolResultsIn } from "./mock-gemini-server";
 
 let mf: Miniflare;
 let modalServer: MockModalServer;
 let githubServer: MockGitHubServer;
+let geminiServer: MockGeminiServer;
 let workerScript: string;
 
 beforeAll(async () => {
@@ -15,6 +17,8 @@ beforeAll(async () => {
   await modalServer.start();
   githubServer = new MockGitHubServer();
   await githubServer.start();
+  geminiServer = new MockGeminiServer();
+  await geminiServer.start();
 
   // 2. Bundle the worker entry with esbuild so Miniflare can load it
   const build = await esbuild.build({
@@ -44,6 +48,7 @@ beforeAll(async () => {
       MODAL_SANDBOX_URL: modalServer.url,
       AGENT_SANDBOX_TOKEN: "mock-token",
       GOOGLE_GENERATIVE_AI_API_KEY: "mock-key",
+      GOOGLE_GENERATIVE_AI_BASE_URL: geminiServer.url,
       GITHUB_API_URL: githubServer.url,
     },
   });
@@ -55,6 +60,7 @@ afterAll(async () => {
   await mf?.dispose();
   await modalServer?.stop();
   await githubServer?.stop();
+  await geminiServer?.stop();
 });
 
 // ──────────────────────────────────────────────────────
@@ -161,13 +167,10 @@ describe("Task start + agent loop (mocked Modal)", () => {
     // -- Task assertions --
     expect(task).toBeTruthy();
     expect(task.id).toBe(TASK_ID);
-    // The task should have completed (RESOLVED or FAILED depending on
-    // the mock model's tool-calling behaviour). Since our mock Modal
-    // server always returns success for /session/create and /exec, and
-    // the AI SDK's generateText will use the real model (which won't
-    // have a valid API key), the agent loop will likely FAIL on the
-    // LLM call. That's fine — we verify the machinery works.
-    expect(["RESOLVED", "FAILED"]).toContain(task.status);
+    // No script matches this prompt, so the mock model answers "Done." on its first turn.
+    expect(task.status).toBe("RESOLVED");
+    const [llmCall] = geminiServer.requestsFor("Fix the compaction pipeline");
+    expect(llmCall).toMatchObject({ model: "gemini-2.5-flash", apiKey: "mock-key" });
     expect(task.prompt).toBe("Fix the compaction pipeline in pipelines/compact.py");
     expect(task.created_at).toBeTruthy();
     expect(task.updated_at).toBeTruthy();
@@ -260,7 +263,7 @@ describe("Entry Worker routing", () => {
 
   it("routes /api/tasks/:id/status to the DO", async () => {
     const taskId = "route-test-start"; // Same DO as above
-    // Wait a moment for the background agent to attempt (and likely fail)
+    // Wait a moment for the background agent to run
     await new Promise((r) => setTimeout(r, 2000));
 
     const res = await mf.dispatchFetch(
@@ -426,6 +429,132 @@ describe(".gantry.yml", () => {
     const task = await waitForTask(taskId);
     expect(task.status).toBe("FAILED");
     expect(task.verification).toBeNull();
+    expect(sessionFor(taskId)!.terminated).toBe(true);
+  });
+});
+
+describe("Agent loop tools (mock Gemini)", () => {
+  const repoUrl = "https://github.com/example/tools";
+  const COUNT_PY = "def count(xs):\n    return len(xs) + 1\n";
+
+  beforeAll(() => {
+    modalServer.repoFiles.set(repoUrl, { "src/count.py": COUNT_PY });
+  });
+
+  async function stepsOf(taskId: string): Promise<any[]> {
+    const res = await mf.dispatchFetch(`http://localhost/api/tasks/${taskId}/steps`);
+    return ((await res.json()) as { steps: any[] }).steps;
+  }
+
+  it("reads, edits and diffs a file through the loop", async () => {
+    const marker = "[loop-read-edit]";
+    geminiServer.script(marker, [
+      { toolCalls: [{ name: "readFile", args: { path: "src/count.py" } }] },
+      {
+        toolCalls: [{
+          name: "editFile",
+          args: { path: "src/count.py", edits: [{ oldText: "len(xs) + 1", newText: "len(xs)" }] },
+        }],
+      },
+      { toolCalls: [{ name: "getDiff", args: {} }] },
+      { text: "Fixed the off-by-one." },
+    ]);
+    const taskId = "loop-read-edit";
+    await startTask(taskId, { prompt: `${marker} fix count`, repoUrl });
+    const task = await waitForTask(taskId);
+
+    expect(task.status).toBe("RESOLVED");
+    expect(sessionFor(taskId)!.files.get("src/count.py")).toBe("def count(xs):\n    return len(xs)\n");
+
+    const results = toolResultsIn(geminiServer.requestsFor(marker).at(-1)!);
+    expect(results.map((r) => r.name)).toEqual(["readFile", "editFile", "getDiff"]);
+    expect(results[0].result).toMatchObject({
+      path: "src/count.py",
+      content: "1: def count(xs):\n2:     return len(xs) + 1",
+      totalLines: 2,
+      truncated: false,
+    });
+    expect(results[1].result).toEqual({ path: "src/count.py", replacements: 1 });
+    expect(results[2].result.patch).toContain("+    return len(xs)");
+
+    expect((await stepsOf(taskId)).map((s) => s.tool_name)).toEqual(["readFile", "editFile", "getDiff"]);
+  });
+
+  it("writes a new file without reading it first", async () => {
+    const marker = "[loop-write-new]";
+    geminiServer.script(marker, [
+      { toolCalls: [{ name: "writeFile", args: { path: "src/new.py", content: "X = 1\n" } }] },
+    ]);
+    const taskId = "loop-write-new";
+    await startTask(taskId, { prompt: `${marker} add a file`, repoUrl });
+    expect((await waitForTask(taskId)).status).toBe("RESOLVED");
+    expect(sessionFor(taskId)!.files.get("src/new.py")).toBe("X = 1\n");
+    const [write] = toolResultsIn(geminiServer.requestsFor(marker).at(-1)!);
+    expect(write.result).toEqual({ path: "src/new.py", existed: false });
+  });
+
+  it.each([
+    [
+      "overwriting a file it hasn't read",
+      { name: "writeFile", args: { path: "src/count.py", content: "oops\n" } },
+      /must read file src\/count\.py before overwriting/,
+    ],
+    [
+      "an edit whose oldText doesn't match",
+      { name: "editFile", args: { path: "src/count.py", edits: [{ oldText: "no such text", newText: "x" }] } },
+      /src\/count\.py/,
+    ],
+    [
+      "reading a missing file",
+      { name: "readFile", args: { path: "src/missing.py" } },
+      /File not found: src\/missing\.py/,
+    ],
+  ])("returns {error} to the model for %s, and the task still resolves", async (name, call, message) => {
+    const marker = `[loop-error-${name}]`;
+    geminiServer.script(marker, [{ toolCalls: [call] }, { text: "Giving up." }]);
+    const taskId = `loop-error-${call.name}`;
+    await startTask(taskId, { prompt: `${marker} try it`, repoUrl });
+    const task = await waitForTask(taskId);
+
+    expect(task.status).toBe("RESOLVED");
+    expect(sessionFor(taskId)!.files.has("src/count.py")).toBe(false);
+    const [result] = toolResultsIn(geminiServer.requestsFor(marker).at(-1)!);
+    expect(result.name).toBe(call.name);
+    expect(result.result.error).toMatch(message);
+
+    const [step] = await stepsOf(taskId);
+    expect(step.tool_name).toBe(call.name);
+    expect(JSON.parse(step.tool_output).error).toMatch(message);
+  });
+
+  it("offers runTests only when .gantry.yml declares a test command, and returns its result", async () => {
+    const withTests = "https://github.com/example/tools-with-tests";
+    modalServer.repoFiles.set(withTests, { ".gantry.yml": "test: pytest -q\n" });
+    modalServer.commandResults.set("pytest -q", { exit_code: 1, stdout: "1 failed" });
+    const marker = "[loop-run-tests]";
+    geminiServer.script(marker, [{ toolCalls: [{ name: "runTests", args: {} }] }]);
+    const taskId = "loop-run-tests";
+    await startTask(taskId, { prompt: `${marker} run them`, repoUrl: withTests });
+    expect((await waitForTask(taskId)).status).toBe("RESOLVED");
+
+    const requests = geminiServer.requestsFor(marker);
+    expect(JSON.stringify(requests[0].body.tools)).toContain("runTests");
+    const [result] = toolResultsIn(requests.at(-1)!);
+    expect(result).toMatchObject({ name: "runTests", result: { exit_code: 1, stdout: "1 failed" } });
+
+    // A repo without a test command never sees the tool.
+    const [plain] = geminiServer.requestsFor("[loop-write-new]");
+    expect(JSON.stringify(plain.body.tools)).not.toContain("runTests");
+  });
+
+  it("fails the task when the model call fails, and still terminates the sandbox", async () => {
+    const marker = "[loop-llm-error]";
+    // The AI SDK doesn't retry a 400, so the failure is immediate.
+    geminiServer.script(marker, [{ status: 400 }]);
+    const taskId = "loop-llm-error";
+    await startTask(taskId, { prompt: `${marker} anything`, repoUrl });
+    const task = await waitForTask(taskId);
+    expect(task.status).toBe("FAILED");
     expect(sessionFor(taskId)!.terminated).toBe(true);
   });
 });

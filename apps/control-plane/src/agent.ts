@@ -1,5 +1,5 @@
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { generateText, tool, type LanguageModelV1, type ToolSet } from "ai";
+import { generateText, tool, type ToolSet } from "ai";
 import { z } from "zod";
 import type { Env } from "./TaskCoordinator";
 import {
@@ -65,21 +65,17 @@ export interface AgentLoopOptions {
   onChunk: (chunk: string) => void;
   /** Called once .gantry.yml has been read, before setup runs. */
   onConfig?: (config: GantryConfig, verification: Verification) => void;
-  modelOverride?: LanguageModelV1;
 }
 
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTelemetry> {
-  const { env, prompt, taskId, repo, onStep, onConfig, modelOverride } = options;
+  const { env, prompt, taskId, repo, onStep, onConfig } = options;
 
-  let model: LanguageModelV1;
-  if (modelOverride) {
-    model = modelOverride;
-  } else {
-    const google = createGoogleGenerativeAI({
-      apiKey: env.GOOGLE_GENERATIVE_AI_API_KEY
-    });
-    model = google("gemini-2.5-flash");
-  }
+  const google = createGoogleGenerativeAI({
+    apiKey: env.GOOGLE_GENERATIVE_AI_API_KEY,
+    // Unset in production; the tests point it at the mock Gemini server.
+    baseURL: env.GOOGLE_GENERATIVE_AI_BASE_URL
+  });
+  const model = google("gemini-2.5-flash");
 
   // 1. Initialize Modal Sandbox session
   const initRes = await fetch(`${env.MODAL_SANDBOX_URL}/session/create`, {

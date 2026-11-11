@@ -124,7 +124,7 @@ interface AgentRunner {
 
 - `agent.ts` becomes the AI SDK implementation: the outer loop, checkpoints and the interrupted note.
 - `pipeline.ts`, new, holds the stage order, red-green, the outcomes and the retry policy. The DO calls it.
-- The mock model in tests drives `AgentRunner` exactly as it drives `generateText` today, through `env.MODEL_OVERRIDE`.
+- The tests drive `AgentRunner` through the scripted mock Gemini server (`tests/mock-gemini-server.ts`, pointed at by `GOOGLE_GENERATIVE_AI_BASE_URL`), exactly as they drive `generateText` today.
 
 ## Telemetry
 
