@@ -176,7 +176,7 @@ export class MockModalServer {
               return;
             }
             res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ status: "ok", path, content }));
+            res.end(JSON.stringify({ status: "ok", path, content, truncated: false }));
             return;
           }
 

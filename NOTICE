@@ -1,0 +1,20 @@
+Gantry includes code adapted from these projects.
+
+eve
+Copyright 2026 Vercel, Inc. and contributors
+Licensed under the Apache License, Version 2.0 (third_party/eve/LICENSE).
+https://github.com/vercel/eve
+
+  apps/control-plane/src/tools/editMatching.ts and apps/control-plane/src/tools/fileTools.ts
+  are adapted from eve 1.0.0-rc.9 (packages/eve/src/tools/provided/edit-file.ts and
+  packages/eve/src/execution/sandbox/{read,write}-file.ts). Changes: the sandbox is reached
+  through Gantry's sandbox API, paths are relative to the repo checkout, read stamps live in
+  memory for one task, and tool errors are returned to the model rather than thrown.
+
+pi
+Copyright (c) 2025 Mario Zechner
+Licensed under the MIT License (third_party/pi/LICENSE).
+https://github.com/badlogic/pi-mono
+
+  eve's edit_file, and so editMatching.ts, is adapted from pi's edit tool
+  (packages/coding-agent/src/core/tools/edit.ts and edit-diff.ts).
