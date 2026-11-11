@@ -1,5 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
-import { runAgentLoop, type AgentTelemetry, type RepoTarget } from "./agent";
+import { runAgentLoop, type AgentTelemetry } from "./agent";
+import { TaskInputError } from "./github";
+import { resolveTaskInput, type TaskInput, type TaskStartBody } from "./taskInput";
+import type { Verification } from "./gantryConfig";
+
+export type { TaskStartBody };
 
 export interface Env {
   TASK_COORDINATOR: DurableObjectNamespace;
@@ -8,6 +13,10 @@ export interface Env {
   MODAL_SANDBOX_URL: string;
   AGENT_SANDBOX_TOKEN: string;
   GOOGLE_GENERATIVE_AI_API_KEY: string;
+  /** Defaults to https://api.github.com. */
+  GITHUB_API_URL?: string;
+  /** Optional token for the GitHub API. Step 3 replaces it with a GitHub App installation token. */
+  GITHUB_TOKEN?: string;
   // Test/mock hooks
   MODEL_OVERRIDE?: any;
 }
@@ -18,6 +27,11 @@ export interface TaskRecord {
   prompt: string;
   repo_url: string | null;
   ref: string | null;
+  issue_number: number | null;
+  issue_url: string | null;
+  /** Null until .gantry.yml has been read. */
+  verification: Verification | null;
+  test_command: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -31,15 +45,6 @@ export interface StepRecord {
   tool_output: string;
   tokens_used: number;
   created_at: string;
-}
-
-export interface TaskStartBody {
-  taskId?: string;
-  prompt: string;
-  /** Public https git URL to clone into the sandbox. Omit to start with an empty workspace. */
-  repoUrl?: string;
-  /** Branch, tag, or commit SHA. Defaults to the remote's HEAD. */
-  ref?: string;
 }
 
 export class TaskCoordinator extends DurableObject<Env> {
@@ -75,10 +80,18 @@ export class TaskCoordinator extends DurableObject<Env> {
       );
     `);
 
-    // Durable Objects created before repo_url/ref existed: add the columns in place.
+    // Durable Objects created before these columns existed: add them in place.
     const cols = this.sql.exec(`PRAGMA table_info(tasks)`).toArray().map((c: any) => c.name);
-    for (const col of ["repo_url", "ref"]) {
-      if (!cols.includes(col)) this.sql.exec(`ALTER TABLE tasks ADD COLUMN ${col} TEXT`);
+    const added: Array<[string, string]> = [
+      ["repo_url", "TEXT"],
+      ["ref", "TEXT"],
+      ["issue_number", "INTEGER"],
+      ["issue_url", "TEXT"],
+      ["verification", "TEXT"],
+      ["test_command", "TEXT"],
+    ];
+    for (const [col, type] of added) {
+      if (!cols.includes(col)) this.sql.exec(`ALTER TABLE tasks ADD COLUMN ${col} ${type}`);
     }
   }
 
@@ -96,14 +109,31 @@ export class TaskCoordinator extends DurableObject<Env> {
     }
 
     if ((url.pathname === "/start" || url.pathname.endsWith("/start")) && request.method === "POST") {
-      const body = (await request.json()) as TaskStartBody;
+      let body: TaskStartBody;
+      try {
+        body = (await request.json()) as TaskStartBody;
+      } catch {
+        return Response.json({ error: "body must be JSON" }, { status: 400 });
+      }
       let taskId = body.taskId;
       if (!taskId) {
         const match = url.pathname.match(/\/api\/tasks\/([^/]+)\/start/);
         taskId = match ? match[1] : `task_${Date.now()}`;
       }
-      const repo = body.repoUrl ? { url: body.repoUrl, ref: body.ref || "HEAD" } : undefined;
-      return this.handleStartTask(taskId, body.prompt, repo);
+
+      let input: TaskInput;
+      try {
+        input = await resolveTaskInput(body, {
+          apiUrl: this.env.GITHUB_API_URL,
+          token: this.env.GITHUB_TOKEN,
+        });
+      } catch (e) {
+        if (e instanceof TaskInputError) {
+          return Response.json({ error: e.message }, { status: e.status });
+        }
+        throw e;
+      }
+      return this.handleStartTask(taskId, input);
     }
 
     if (url.pathname === "/status" || url.pathname.endsWith("/status")) {
@@ -139,25 +169,27 @@ export class TaskCoordinator extends DurableObject<Env> {
     return cursor.toArray() as unknown as StepRecord[];
   }
 
-  private async handleStartTask(taskId: string, prompt: string, repo?: RepoTarget): Promise<Response> {
+  private async handleStartTask(taskId: string, input: TaskInput): Promise<Response> {
+    const { prompt, repo, issue } = input;
     const now = new Date().toISOString();
     this.sql.exec(
-      `INSERT INTO tasks (id, status, prompt, repo_url, ref, created_at, updated_at)
-       VALUES (?, 'RUNNING', ?, ?, ?, ?, ?)
+      `INSERT INTO tasks (id, status, prompt, repo_url, ref, issue_number, issue_url, created_at, updated_at)
+       VALUES (?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET status='RUNNING', updated_at=?`,
-      taskId, prompt, repo?.url ?? null, repo?.ref ?? null, now, now, now
+      taskId, prompt, repo?.url ?? null, repo?.ref ?? null, issue?.number ?? null, issue?.url ?? null, now, now, now
     );
 
-    this.broadcast({ type: "TASK_STARTED", taskId, prompt, repo });
+    this.broadcast({ type: "TASK_STARTED", taskId, prompt, repo, issue });
 
     // Run execution loop in background
-    const sessionPromise = this.executeAgentSession(taskId, prompt, repo);
+    const sessionPromise = this.executeAgentSession(taskId, input);
     this.ctx.waitUntil(sessionPromise);
 
     return Response.json({ success: true, taskId });
   }
 
-  async executeAgentSession(taskId: string, prompt: string, repo?: RepoTarget): Promise<void> {
+  async executeAgentSession(taskId: string, input: TaskInput): Promise<void> {
+    const { prompt, repo } = input;
     let finalStatus: "RESOLVED" | "FAILED" = "RESOLVED";
     let telemetryData: AgentTelemetry | null = null;
 
@@ -168,6 +200,13 @@ export class TaskCoordinator extends DurableObject<Env> {
         taskId,
         repo,
         modelOverride: this.env.MODEL_OVERRIDE,
+        onConfig: (config, verification) => {
+          this.sql.exec(
+            `UPDATE tasks SET verification = ?, test_command = ?, updated_at = ? WHERE id = ?`,
+            verification, config.test ?? null, new Date().toISOString(), taskId
+          );
+          this.broadcast({ type: "TASK_CONFIG", taskId, verification, testCommand: config.test ?? null });
+        },
         onStep: (step) => {
           this.sql.exec(
             `INSERT INTO steps (task_id, step_index, tool_name, tool_input, tool_output, created_at)

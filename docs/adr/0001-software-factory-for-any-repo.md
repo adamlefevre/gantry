@@ -51,7 +51,7 @@ The goal is a factory: label an issue in any repo and get back a verified PR.
 ## Rollout
 
 1. The sandbox clones `{repo_url, ref}`, with git installed.
-2. A task becomes `{repo, issue}`; add `.gantry.yml`.
+2. A task becomes `{repo, issue}`; add `.gantry.yml`. (Done; ADR 0002 records where `.gantry.yml` is parsed.)
 3. Add the GitHub App, the label webhook and opening PRs from the control plane.
 4. Add factory-run red-green verification around the agent loop, and raise the loop's step limit and tools as needed.
 5. Write telemetry as Parquet, plus an analytics view.

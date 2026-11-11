@@ -6,7 +6,10 @@ export interface MockSession {
   taskId?: string;
   repoUrl?: string;
   ref?: string;
+  /** Files the agent wrote (these make up the mock `git diff`). */
   files: Map<string, string>;
+  /** Files present in the checkout, seeded from `repoFiles` for the session's repo_url. */
+  repoFiles: Map<string, string>;
   commands: string[];
   terminated: boolean;
   createdAt: number;
@@ -21,6 +24,10 @@ export interface MockRequestLog {
 export class MockModalServer {
   private server: http.Server | null = null;
   public sessions: Map<string, MockSession> = new Map();
+  /** repo_url -> files in that repo's checkout (e.g. ".gantry.yml"). Unknown paths read as 404. */
+  public repoFiles: Map<string, Record<string, string>> = new Map();
+  /** Exact command -> result, to simulate failing setup or test commands. */
+  public commandResults: Map<string, { exit_code: number; stdout?: string; stderr?: string }> = new Map();
   public requests: MockRequestLog[] = [];
   public port: number = 0;
   public url: string = "";
@@ -63,6 +70,7 @@ export class MockModalServer {
               repoUrl: body.repo_url,
               ref: body.ref,
               files: new Map(),
+              repoFiles: new Map(Object.entries(this.repoFiles.get(body.repo_url) ?? {})),
               commands: [],
               terminated: false,
               createdAt: Date.now(),
@@ -85,9 +93,15 @@ export class MockModalServer {
             }
 
             let stdout = "";
+            let stderr = "";
             let exitCode = 0;
 
-            if (command.includes("pytest")) {
+            const canned = this.commandResults.get(command);
+            if (canned) {
+              exitCode = canned.exit_code;
+              stdout = canned.stdout ?? "";
+              stderr = canned.stderr ?? "";
+            } else if (command.includes("pytest")) {
               stdout = [
                 "============================= test session starts ==============================",
                 "platform linux -- Python 3.11.8, pytest-8.1.1, pluggy-1.4.0",
@@ -134,7 +148,7 @@ export class MockModalServer {
                 sessionId: sessionId || "sb_default",
                 exit_code: exitCode,
                 stdout,
-                stderr: "",
+                stderr,
               })
             );
             return;
@@ -154,7 +168,13 @@ export class MockModalServer {
           // Route: /file/read
           if (pathname === "/file/read" && req.method === "POST") {
             const { path } = body;
-            const content = session?.files.get(path) ?? `# Mock content for ${path}\n`;
+            // Like the real service: a missing file is a 404.
+            const content = session?.files.get(path) ?? session?.repoFiles.get(path);
+            if (content === undefined) {
+              res.writeHead(404, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ detail: `Cannot read ${path}` }));
+              return;
+            }
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ status: "ok", path, content }));
             return;

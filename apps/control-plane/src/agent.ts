@@ -1,7 +1,33 @@
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { generateText, tool, type LanguageModelV1 } from "ai";
+import { generateText, tool, type LanguageModelV1, type ToolSet } from "ai";
 import { z } from "zod";
 import type { Env } from "./TaskCoordinator";
+import {
+  GANTRY_CONFIG_PATH,
+  parseGantryConfig,
+  verificationFor,
+  type GantryConfig,
+  type Verification
+} from "./gantryConfig";
+
+/** LLM round-trips per task. Setup doesn't count; each tool call (including runTests) does. */
+export const MAX_AGENT_STEPS = 16;
+/** Seconds each setup command and each test run may take inside the sandbox. */
+const SETUP_TIMEOUT_SECONDS = 600;
+const TEST_TIMEOUT_SECONDS = 600;
+/** Command output kept in step records and returned to the model (the tail, where errors are). */
+const MAX_OUTPUT_CHARS = 16_000;
+
+interface ExecResult {
+  exit_code: number;
+  stdout: string;
+  stderr: string;
+}
+
+function tail(s: string | undefined, max = MAX_OUTPUT_CHARS): string {
+  if (!s) return "";
+  return s.length > max ? `[...${s.length - max} chars truncated]\n` + s.slice(-max) : s;
+}
 
 export interface StepAudit {
   stepIndex: number;
@@ -16,6 +42,9 @@ export interface AgentTelemetry {
   totalTokens: number;
   stepsCount: number;
   patch: string;
+  /** Whether the run can be verified: no `test:` in .gantry.yml means unverified (draft PR only). */
+  verification: Verification;
+  testCommand: string | null;
   completedAt: string;
 }
 
@@ -32,11 +61,13 @@ export interface AgentLoopOptions {
   repo?: RepoTarget;
   onStep: (step: StepAudit) => void;
   onChunk: (chunk: string) => void;
+  /** Called once .gantry.yml has been read, before setup runs. */
+  onConfig?: (config: GantryConfig, verification: Verification) => void;
   modelOverride?: LanguageModelV1;
 }
 
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTelemetry> {
-  const { env, prompt, taskId, repo, onStep, modelOverride } = options;
+  const { env, prompt, taskId, repo, onStep, onConfig, modelOverride } = options;
 
   let model: LanguageModelV1;
   if (modelOverride) {
@@ -80,18 +111,70 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
     return res.json();
   };
 
+  /** POST /file/read; null when the file doesn't exist (the service answers 404). */
+  const readOptionalFile = async (path: string): Promise<string | null> => {
+    const res = await fetch(`${env.MODAL_SANDBOX_URL}/file/read`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.AGENT_SANDBOX_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ sessionId, sandbox_id: sessionId, path })
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`Sandbox API error [/file/read]: ${await res.text()}`);
+    const data = (await res.json()) as { content?: string };
+    return data.content ?? "";
+  };
+
   let stepCounter = 0;
 
   try {
+    // 2. Read .gantry.yml (only a cloned repo has one) and run its setup commands.
+    const config = parseGantryConfig(repo ? await readOptionalFile(GANTRY_CONFIG_PATH) : null);
+    const verification = verificationFor(config);
+    onConfig?.(config, verification);
+
+    for (const command of config.setup) {
+      const data = (await callSandbox("/exec", {
+        command,
+        timeout_seconds: SETUP_TIMEOUT_SECONDS
+      })) as ExecResult;
+      onStep({
+        stepIndex: ++stepCounter,
+        toolName: "setup",
+        input: { command },
+        output: { exit_code: data.exit_code, stdout: tail(data.stdout), stderr: tail(data.stderr) }
+      });
+      if (data.exit_code !== 0) {
+        throw new Error(`Setup command failed (exit ${data.exit_code}): ${command}\n${tail(data.stderr, 2000)}`);
+      }
+    }
+
+    // 3. The agent loop.
+    const testTools: ToolSet = config.test
+      ? {
+          runTests: tool({
+            description: `Run the repository's test suite (\`${config.test}\`). Use it to check your fix before finishing.`,
+            parameters: z.object({}),
+            execute: async () => {
+              const data = (await callSandbox("/exec", {
+                command: config.test,
+                timeout_seconds: TEST_TIMEOUT_SECONDS
+              })) as ExecResult;
+              const output = { exit_code: data.exit_code, stdout: tail(data.stdout), stderr: tail(data.stderr) };
+              onStep({ stepIndex: ++stepCounter, toolName: "runTests", input: { command: config.test }, output });
+              return output;
+            }
+          })
+        }
+      : {};
+
     const result = await generateText({
       model,
-      system: `You are Gantry's autonomous software engineer.
-You operate inside a Linux sandbox with git, pytest, and python.
-${repo ? `The repository ${repo.url} (ref ${repo.ref}) is checked out in your working directory.
-` : ""}Investigate the codebase, reproduce issues using pytest, edit files, and verify fixes.
-Once tests pass, call getDiff() to generate the final unified patch and exit.`,
+      system: buildSystemPrompt({ repo, testCommand: config.test }),
       prompt,
-      maxSteps: 8,
+      maxSteps: MAX_AGENT_STEPS,
       tools: {
         runCommand: tool({
           description: "Execute a bash shell command in the sandbox",
@@ -158,7 +241,9 @@ Once tests pass, call getDiff() to generate the final unified patch and exit.`,
             });
             return { patch: data.stdout || "" };
           }
-        })
+        }),
+
+        ...testTools
       }
     });
 
@@ -171,6 +256,8 @@ Once tests pass, call getDiff() to generate the final unified patch and exit.`,
       totalTokens: result.usage?.totalTokens ?? 0,
       stepsCount: stepCounter,
       patch: patchRes.stdout || "",
+      verification,
+      testCommand: config.test ?? null,
       completedAt: new Date().toISOString()
     };
   } finally {
@@ -184,4 +271,29 @@ Once tests pass, call getDiff() to generate the final unified patch and exit.`,
       body: JSON.stringify({ sessionId, sandbox_id: sessionId })
     }).catch((e) => console.error("Sandbox termination error:", e));
   }
+}
+
+export function buildSystemPrompt(opts: { repo?: RepoTarget; testCommand?: string }): string {
+  const lines = [
+    "You are Gantry's autonomous software engineer.",
+    "You operate inside an isolated Linux sandbox with git, Python and common build tools.",
+  ];
+  if (opts.repo) {
+    lines.push(
+      `The repository ${opts.repo.url} (ref ${opts.repo.ref}) is checked out in your working directory, and its setup commands have already run.`,
+      "If the repo has an AGENTS.md or CLAUDE.md, read it first and follow its conventions."
+    );
+  }
+  lines.push("Investigate the codebase, reproduce the problem, edit files, and verify your fix.");
+  if (opts.testCommand) {
+    lines.push(
+      `This repo's test command is \`${opts.testCommand}\`. Run it with the runTests tool. Add or update a test that covers the fix, and make sure the full suite passes before you finish.`
+    );
+  } else {
+    lines.push(
+      "This repo declares no test command, so your work cannot be verified automatically. Find and run whatever tests exist if you can, and say clearly in your final message what you checked."
+    );
+  }
+  lines.push("When you are done, call getDiff() to produce the final unified patch, then stop.");
+  return lines.join("\n");
 }

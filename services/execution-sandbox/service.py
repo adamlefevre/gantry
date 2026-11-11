@@ -2,7 +2,7 @@ import os
 import re
 
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import modal
 
 app = modal.App("agent-sandbox-service")
@@ -37,9 +37,16 @@ class CreateSessionRequest(BaseModel):
     ref: str = "HEAD"
 
 
+# Whole-sandbox lifetime. Setup (.gantry.yml) plus the agent loop and test runs must fit in it.
+SANDBOX_TIMEOUT_SECONDS = 1800
+# /file/read returns at most this much, so a huge file (or a symlink to /dev/zero) can't exhaust memory.
+MAX_READ_BYTES = 1024 * 1024
+
+
 class ExecRequest(BaseModel):
     command: str
-    timeout_seconds: int = 60
+    # Setup and test commands from .gantry.yml ask for longer timeouts than agent commands.
+    timeout_seconds: int = Field(default=60, ge=1, le=900)
     sandbox_id: str | None = None
 
 
@@ -103,7 +110,7 @@ def create_session(req: CreateSessionRequest | None = None, authorization: str =
     if not REF_RE.match(req.ref):
         raise HTTPException(status_code=422, detail="invalid ref")
 
-    sb = modal.Sandbox.create(image=sandbox_image, app=app, timeout=600)
+    sb = modal.Sandbox.create(image=sandbox_image, app=app, timeout=SANDBOX_TIMEOUT_SECONDS)
     try:
         run(sb, "mkdir", "-p", WORKDIR, workdir=None)
         commit = checkout(sb, req.repo_url, req.ref) if req.repo_url else None
@@ -147,10 +154,12 @@ def write_file(req: FileWriteRequest, authorization: str = Header(None)):
 def read_file(req: FileReadRequest, authorization: str = Header(None)):
     verify_auth(authorization)
     sb = get_sandbox(req.sandbox_id)
-    code, out, err = run(sb, "cat", "--", req.path)
+    # 404 means "missing or unreadable"; the control plane treats a missing .gantry.yml as "no config".
+    code, out, err = run(sb, "head", "-c", str(MAX_READ_BYTES + 1), "--", req.path, timeout=30)
     if code != 0:
         raise HTTPException(status_code=404, detail=err or f"Cannot read {req.path}")
-    return {"status": "ok", "path": req.path, "content": out}
+    truncated = len(out) > MAX_READ_BYTES
+    return {"status": "ok", "path": req.path, "content": out[:MAX_READ_BYTES], "truncated": truncated}
 
 
 @web_app.post("/session/terminate")
