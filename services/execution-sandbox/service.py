@@ -130,7 +130,11 @@ def execute_command(req: ExecRequest, authorization: str = Header(None)):
 # The path goes in as argv and the content over stdin, so neither one is ever parsed by a shell.
 WRITE_SCRIPT = (
     "import os, sys; p = sys.argv[1]; d = os.path.dirname(p); "
-    "d and os.makedirs(d, exist_ok=True); open(p, 'w').write(sys.stdin.read())"
+    "d and os.makedirs(d, exist_ok=True); "
+    # UTF-8 regardless of locale, and newline='' so CRLF files keep their endings.
+    # Opening an existing file with 'w' truncates it in place, so its mode is kept.
+    "sys.stdin.reconfigure(encoding='utf-8', newline=''); "
+    "open(p, 'w', encoding='utf-8', newline='').write(sys.stdin.read())"
 )
 
 
@@ -153,11 +157,17 @@ def read_file(req: FileReadRequest, authorization: str = Header(None)):
     verify_auth(authorization)
     sb = get_sandbox(req.sandbox_id)
     # 404 means "missing or unreadable"; the control plane treats a missing .gantry.yml as "no config".
-    code, out, err = run(sb, "head", "-c", str(MAX_READ_BYTES + 1), "--", req.path, timeout=30)
-    if code != 0:
+    # Read bytes, not text: the cap is in bytes, and a cut can split a multi-byte character.
+    proc = sb.exec("head", "-c", str(MAX_READ_BYTES + 1), "--", req.path, workdir=WORKDIR, timeout=30, text=False)
+    proc.wait()
+    out = proc.stdout.read()
+    if proc.returncode != 0:
+        err = proc.stderr.read().decode("utf-8", errors="replace")
         raise HTTPException(status_code=404, detail=err or f"Cannot read {req.path}")
     truncated = len(out) > MAX_READ_BYTES
-    return {"status": "ok", "path": req.path, "content": out[:MAX_READ_BYTES], "truncated": truncated}
+    # Bytes that aren't UTF-8 become U+FFFD, which the control plane's editFile refuses to rewrite.
+    content = out[:MAX_READ_BYTES].decode("utf-8", errors="replace")
+    return {"status": "ok", "path": req.path, "content": content, "truncated": truncated}
 
 
 @web_app.post("/session/terminate")

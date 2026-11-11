@@ -9,6 +9,8 @@ import {
   type GantryConfig,
   type Verification
 } from "./gantryConfig";
+import { prepareEditArguments } from "./tools/editMatching";
+import { DEFAULT_READ_LIMIT, FileTools, MAX_LINE_LENGTH } from "./tools/fileTools";
 
 /** LLM round-trips per task. Setup doesn't count; each tool call (including runTests) does. */
 export const MAX_AGENT_STEPS = 16;
@@ -112,7 +114,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
   };
 
   /** POST /file/read; null when the file doesn't exist (the service answers 404). */
-  const readOptionalFile = async (path: string): Promise<string | null> => {
+  const readSandboxFile = async (path: string): Promise<{ content: string; truncated: boolean } | null> => {
     const res = await fetch(`${env.MODAL_SANDBOX_URL}/file/read`, {
       method: "POST",
       headers: {
@@ -123,8 +125,31 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
     });
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`Sandbox API error [/file/read]: ${await res.text()}`);
-    const data = (await res.json()) as { content?: string };
-    return data.content ?? "";
+    const data = (await res.json()) as { content?: string; truncated?: boolean };
+    return { content: data.content ?? "", truncated: data.truncated === true };
+  };
+  const readOptionalFile = async (path: string) => (await readSandboxFile(path))?.content ?? null;
+
+  const fileTools = new FileTools({
+    read: readSandboxFile,
+    write: async (path, content) => {
+      await callSandbox("/file/write", { path, content });
+    }
+  });
+
+  /**
+   * Runs a tool body, records the step, and hands errors back to the model as `{error}`.
+   * In AI SDK v4 a thrown tool error would abort the whole loop instead.
+   */
+  const audited = async <T>(toolName: string, input: Record<string, unknown>, run: () => Promise<T>) => {
+    let output: T | { error: string };
+    try {
+      output = await run();
+    } catch (e) {
+      output = { error: e instanceof Error ? e.message : String(e) };
+    }
+    onStep({ stepIndex: ++stepCounter, toolName, input, output });
+    return output;
   };
 
   let stepCounter = 0;
@@ -193,39 +218,59 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
           }
         }),
 
-        writeFile: tool({
-          description: "Write content to a file inside the sandbox",
+        readFile: tool({
+          description: [
+            "Read a text file from the repo.",
+            `- Returns up to ${DEFAULT_READ_LIMIT} lines from the start of the file. Each line is prefixed with its number as \`<n>: <text>\`; the prefix is not part of the file.`,
+            "- offset is the 1-based line to start from. When the result is truncated, read on from nextOffset.",
+            `- Lines longer than ${MAX_LINE_LENGTH} characters are cut.`,
+            "- Avoid tiny repeated slices. If you need more context, read a larger window."
+          ].join("\n"),
           parameters: z.object({
-            path: z.string().describe("Relative file path"),
-            content: z.string().describe("File body content")
+            path: z.string().describe("File path relative to the repo root"),
+            offset: z.number().int().optional().describe("1-based line number to start from. Defaults to 1."),
+            limit: z.number().int().optional().describe(`Maximum number of lines to return. Defaults to ${DEFAULT_READ_LIMIT}.`)
           }),
-          execute: async ({ path, content }) => {
-            const data = await callSandbox("/file/write", { path, content });
-            onStep({
-              stepIndex: ++stepCounter,
-              toolName: "writeFile",
-              input: { path, contentLength: content.length },
-              output: data
-            });
-            return data;
-          }
+          execute: (input) => audited("readFile", input, () => fileTools.readFile(input))
         }),
 
-        readFile: tool({
-          description: "Read file contents from the sandbox",
+        editFile: tool({
+          description: [
+            "Edit one file by exact text replacement. Prefer this to writeFile for changing existing files.",
+            "- Every edits[].oldText must match a unique, non-overlapping region of the original file, including whitespace and newlines. Leave out readFile's line-number prefixes.",
+            "- Batch changes to one file in a single call. Each edit is matched against the original file, not applied one after another.",
+            "- If two changes touch the same block or nearby lines, merge them into one edit. Don't include large unchanged regions just to connect distant changes."
+          ].join("\n"),
+          parameters: z.preprocess(
+            prepareEditArguments,
+            z.object({
+              path: z.string().describe("File path relative to the repo root"),
+              edits: z
+                .array(
+                  z.object({
+                    oldText: z.string().describe("Exact text to replace. Must be unique in the original file."),
+                    newText: z.string().describe("Replacement text.")
+                  })
+                )
+                .describe("One or more targeted, non-overlapping replacements.")
+            })
+          ),
+          execute: (input) =>
+            audited("editFile", { path: input.path, edits: input.edits.length }, () => fileTools.editFile(input))
+        }),
+
+        writeFile: tool({
+          description: [
+            "Write a whole file, creating it or replacing its contents.",
+            "- To change an existing file, prefer editFile.",
+            "- Overwriting an existing file requires reading it with readFile first, and fails if it changed since that read."
+          ].join("\n"),
           parameters: z.object({
-            path: z.string().describe("Relative file path")
+            path: z.string().describe("File path relative to the repo root"),
+            content: z.string().describe("Complete file contents")
           }),
-          execute: async ({ path }) => {
-            const data = await callSandbox("/file/read", { path });
-            onStep({
-              stepIndex: ++stepCounter,
-              toolName: "readFile",
-              input: { path },
-              output: data
-            });
-            return data;
-          }
+          execute: ({ path, content }) =>
+            audited("writeFile", { path, contentLength: content.length }, () => fileTools.writeFile({ path, content }))
         }),
 
         getDiff: tool({
