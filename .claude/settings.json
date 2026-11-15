@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(**/.dev.vars)",
+      "Read(**/secrets/**)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Edit(**/.env)",
+      "Edit(**/.env.*)",
+      "Edit(**/.dev.vars)",
+      "Edit(**/secrets/**)",
+      "Edit(~/.ssh/**)",
+      "Edit(~/.aws/**)"
+    ]
+  }
+}
