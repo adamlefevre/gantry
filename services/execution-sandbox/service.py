@@ -7,6 +7,13 @@ import modal
 
 app = modal.App("agent-sandbox-service")
 
+# The web endpoint's URL is https://<your-modal-workspace>--sandbox-service.modal.run, which is
+# what MODAL_SANDBOX_URL in apps/control-plane/wrangler.jsonc expects.
+WEB_LABEL = "sandbox-service"
+# Longest /exec timeout plus room for the request itself. Without this the endpoint would use
+# Modal's 300-second default and cut off 600-second setup and test commands.
+ENDPOINT_TIMEOUT_SECONDS = 960
+
 sandbox_image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git")
@@ -108,7 +115,8 @@ def create_session(req: CreateSessionRequest | None = None, authorization: str =
     if not REF_RE.match(req.ref):
         raise HTTPException(status_code=422, detail="invalid ref")
 
-    sb = modal.Sandbox.create(image=sandbox_image, app=app, timeout=SANDBOX_TIMEOUT_SECONDS)
+    # No app=: inside the deployed endpoint, Modal attaches the sandbox to this app's container.
+    sb = modal.Sandbox.create(image=sandbox_image, timeout=SANDBOX_TIMEOUT_SECONDS)
     try:
         run(sb, "mkdir", "-p", WORKDIR, workdir=None)
         commit = checkout(sb, req.repo_url, req.ref) if req.repo_url else None
@@ -179,8 +187,11 @@ def terminate_session(req: SandboxRef, authorization: str = Header(None)):
 
 @app.function(
     image=modal.Image.debian_slim().pip_install("fastapi[standard]"),
-    secrets=[modal.Secret.from_name("agent-sandbox-secret")]
+    secrets=[modal.Secret.from_name("agent-sandbox-secret")],
+    timeout=ENDPOINT_TIMEOUT_SECONDS,
 )
-@modal.asgi_app()
+# Endpoints block on Modal calls, so one container serves several requests from FastAPI's threadpool.
+@modal.concurrent(max_inputs=20)
+@modal.asgi_app(label=WEB_LABEL)
 def api():
     return web_app

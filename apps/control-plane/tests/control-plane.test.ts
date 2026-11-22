@@ -12,6 +12,10 @@ let modalServer: MockModalServer;
 let githubServer: MockGitHubServer;
 let anthropicServer: MockAnthropicServer;
 let workerScript: string;
+/** Miniflare's own dispatchFetch, without the default Authorization header the tests add. */
+let rawDispatch: Miniflare["dispatchFetch"];
+
+const API_TOKEN = "test-api-token";
 
 beforeAll(async () => {
   // 1. Start the mock Modal server
@@ -52,10 +56,20 @@ beforeAll(async () => {
       ANTHROPIC_API_KEY: "mock-key",
       ANTHROPIC_BASE_URL: anthropicServer.url,
       GITHUB_API_URL: githubServer.url,
+      GANTRY_API_TOKEN: API_TOKEN,
     },
   });
 
   await mf.ready;
+
+  // Every /api route needs the bearer token. Send it by default so each test doesn't have to;
+  // the auth tests use rawDispatch to control the header themselves.
+  rawDispatch = mf.dispatchFetch.bind(mf);
+  mf.dispatchFetch = ((input: any, init?: any) => {
+    const headers = new Headers(init?.headers);
+    if (!headers.has("Authorization")) headers.set("Authorization", `Bearer ${API_TOKEN}`);
+    return rawDispatch(input, { ...init, headers });
+  }) as Miniflare["dispatchFetch"];
 });
 
 afterAll(async () => {
@@ -243,6 +257,58 @@ describe("Task targeting a repo", () => {
     const status = await mf.dispatchFetch(`http://localhost/api/tasks/${taskId}/status`);
     const { task } = (await status.json()) as { task: any };
     expect(task.ref).toBe("HEAD");
+  });
+});
+
+describe("API token", () => {
+  it("rejects /api requests without a token", async () => {
+    const res = await rawDispatch("http://localhost/api/tasks/auth-none/status");
+    expect(res.status).toBe(401);
+    expect(res.headers.get("WWW-Authenticate")).toBe("Bearer");
+  });
+
+  it("rejects a wrong token, and doesn't start a task", async () => {
+    const res = await rawDispatch("http://localhost/api/tasks/auth-wrong/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer not-the-token" },
+      body: JSON.stringify({ prompt: "should never run" }),
+    });
+    expect(res.status).toBe(401);
+    expect(sessionFor("auth-wrong")).toBeUndefined();
+  });
+
+  it("rejects a token that is only a prefix of the real one", async () => {
+    const res = await rawDispatch("http://localhost/api/tasks/auth-prefix/status", {
+      headers: { Authorization: `Bearer ${API_TOKEN.slice(0, -1)}` },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("accepts the right token", async () => {
+    const res = await rawDispatch("http://localhost/api/tasks/auth-ok/status", {
+      headers: { Authorization: `Bearer ${API_TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("refuses every /api request when no token is configured", async () => {
+    const open = new Miniflare({
+      modules: true,
+      compatibilityDate: "2026-03-01",
+      compatibilityFlags: ["nodejs_compat"],
+      script: workerScript,
+      durableObjects: { TASK_COORDINATOR: { className: "TaskCoordinator", useSQLite: true } },
+      bindings: { MODAL_SANDBOX_URL: modalServer.url },
+    });
+    try {
+      const res = await open.dispatchFetch("http://localhost/api/tasks/no-token/status", {
+        headers: { Authorization: "Bearer anything" },
+      });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toMatch(/not configured/);
+    } finally {
+      await open.dispose();
+    }
   });
 });
 

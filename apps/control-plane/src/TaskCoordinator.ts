@@ -10,6 +10,8 @@ export interface Env {
   TASK_COORDINATOR: DurableObjectNamespace;
   GANTRY_BUCKET?: R2Bucket;
   HYDRALAKE_BUCKET?: R2Bucket;
+  /** Bearer token callers must send on every /api route. Unset: all /api requests are refused. */
+  GANTRY_API_TOKEN?: string;
   MODAL_SANDBOX_URL: string;
   AGENT_SANDBOX_TOKEN: string;
   /** Anthropic API key for the agent's model calls. Stays in the Worker; never sent to the sandbox. */

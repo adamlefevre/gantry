@@ -29,4 +29,5 @@
   "vars": {
     "MODAL_SANDBOX_URL": "https://<your-modal-workspace>--sandbox-service.modal.run"
   }
+  // GANTRY_API_TOKEN is a secret too: callers send it as "Authorization: Bearer <token>" on every /api route.
 }
