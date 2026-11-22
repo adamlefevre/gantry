@@ -12,6 +12,15 @@ import {
 import { prepareEditArguments } from "./tools/editMatching";
 import { DEFAULT_READ_LIMIT, FileTools, MAX_LINE_LENGTH } from "./tools/fileTools";
 
+/** Gemini model used when the GANTRY_MODEL var is unset. */
+export const DEFAULT_MODEL = "gemini-2.5-flash";
+/**
+ * The patch the agent sees from getDiff and the factory keeps at the end. A plain `git diff`
+ * leaves out files the agent created (they're untracked), so new tests and modules would be
+ * missing from the patch. `git add --intent-to-add` makes them show up as new files.
+ */
+export const DIFF_COMMAND = "git add --all --intent-to-add && git diff";
+
 /** LLM round-trips per task. Setup doesn't count; each tool call (including runTests) does. */
 export const MAX_AGENT_STEPS = 16;
 /** Seconds each setup command and each test run may take inside the sandbox. */
@@ -75,7 +84,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
     // Unset in production; the tests point it at the mock Gemini server.
     baseURL: env.GOOGLE_GENERATIVE_AI_BASE_URL
   });
-  const model = google("gemini-2.5-flash");
+  const modelId = env.GANTRY_MODEL || DEFAULT_MODEL;
+  const model = google(modelId);
 
   // 1. Initialize Modal Sandbox session
   const initRes = await fetch(`${env.MODAL_SANDBOX_URL}/session/create`, {
@@ -273,7 +283,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
           description: "Generate a unified git diff patch of all current changes",
           parameters: z.object({}),
           execute: async () => {
-            const data = (await callSandbox("/exec", { command: "git diff" })) as { stdout: string };
+            const data = (await callSandbox("/exec", { command: DIFF_COMMAND })) as { stdout: string };
             onStep({
               stepIndex: ++stepCounter,
               toolName: "getDiff",
@@ -289,11 +299,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
     });
 
     // Capture final patch
-    const patchRes = (await callSandbox("/exec", { command: "git diff" })) as { stdout: string };
+    const patchRes = (await callSandbox("/exec", { command: DIFF_COMMAND })) as { stdout: string };
 
     return {
       taskId,
-      model: "gemini-2.5-flash",
+      model: modelId,
       totalTokens: result.usage?.totalTokens ?? 0,
       stepsCount: stepCounter,
       patch: patchRes.stdout || "",

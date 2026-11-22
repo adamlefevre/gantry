@@ -13,6 +13,8 @@ export interface Env {
   MODAL_SANDBOX_URL: string;
   AGENT_SANDBOX_TOKEN: string;
   GOOGLE_GENERATIVE_AI_API_KEY: string;
+  /** Gemini model ID. Defaults to DEFAULT_MODEL in agent.ts; set it to switch models without a code change. */
+  GANTRY_MODEL?: string;
   /** Defaults to https://api.github.com. */
   GITHUB_API_URL?: string;
   /** Optional token for the GitHub API. Step 3 replaces it with a GitHub App installation token. */

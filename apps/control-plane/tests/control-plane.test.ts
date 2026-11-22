@@ -4,6 +4,7 @@ import esbuild from "esbuild";
 import { MockModalServer } from "./mock-modal-server";
 import { MockGitHubServer } from "./mock-github-server";
 import { MockGeminiServer, toolResultsIn } from "./mock-gemini-server";
+import { DIFF_COMMAND } from "../src/agent";
 
 let mf: Miniflare;
 let modalServer: MockModalServer;
@@ -395,7 +396,7 @@ describe(".gantry.yml", () => {
     await startTask(taskId, { prompt: "fix it", repoUrl: "https://github.com/example/no-config" });
     const task = await waitForTask(taskId);
     expect(task).toMatchObject({ verification: "unverified", test_command: null });
-    expect(sessionFor(taskId)!.commands.filter((c) => c !== "git diff")).toEqual([]);
+    expect(sessionFor(taskId)!.commands.filter((c) => c !== DIFF_COMMAND)).toEqual([]);
   });
 
   it("runs setup but stays unverified when .gantry.yml has no test:", async () => {
@@ -556,5 +557,89 @@ describe("Agent loop tools (mock Gemini)", () => {
     const task = await waitForTask(taskId);
     expect(task.status).toBe("FAILED");
     expect(sessionFor(taskId)!.terminated).toBe(true);
+  });
+});
+
+describe("Telemetry in R2", () => {
+  /** The task's telemetry object; the key's year/month come from when it finished. */
+  async function telemetryFor(taskId: string): Promise<any> {
+    const bucket = await mf.getR2Bucket("GANTRY_BUCKET");
+    const listed = await bucket.list({ prefix: "telemetry/" });
+    const key = listed.objects.map((o) => o.key).find((k) => k.endsWith(`/${taskId}.json`));
+    expect(key).toMatch(/^telemetry\/year=\d{4}\/month=\d{2}\//);
+    return JSON.parse(await (await bucket.get(key!))!.text());
+  }
+
+  it("stores the final patch, including files the agent created", async () => {
+    const marker = "[telemetry-new-file]";
+    geminiServer.script(marker, [
+      { toolCalls: [{ name: "writeFile", args: { path: "tests/test_new.py", content: "def test_x():\n    assert True\n" } }] },
+      { text: "Added a test." },
+    ]);
+    const taskId = "telemetry-new-file";
+    await startTask(taskId, { prompt: `${marker} add a test`, repoUrl: "https://github.com/example/telemetry" });
+    expect((await waitForTask(taskId)).status).toBe("RESOLVED");
+
+    // The final diff marks new files intent-to-add, so untracked files are in the patch.
+    expect(sessionFor(taskId)!.commands.at(-1)).toBe(DIFF_COMMAND);
+    const record = await telemetryFor(taskId);
+    expect(record).toMatchObject({ taskId, model: "gemini-2.5-flash", verification: "unverified" });
+    expect(record.patch).toContain("+++ b/tests/test_new.py");
+  });
+
+  it("getDiff uses the same command, so the model sees new files too", async () => {
+    const marker = "[telemetry-getdiff]";
+    geminiServer.script(marker, [{ toolCalls: [{ name: "getDiff", args: {} }] }, { text: "Done." }]);
+    const taskId = "telemetry-getdiff";
+    await startTask(taskId, { prompt: `${marker} diff`, repoUrl: "https://github.com/example/telemetry" });
+    await waitForTask(taskId);
+    expect(sessionFor(taskId)!.commands.filter((c) => c.includes("git diff"))).toEqual([DIFF_COMMAND, DIFF_COMMAND]);
+  });
+});
+
+describe("GANTRY_MODEL", () => {
+  it("switches the Gemini model and is recorded in telemetry", async () => {
+    const other = new Miniflare({
+      modules: true,
+      compatibilityDate: "2026-03-01",
+      compatibilityFlags: ["nodejs_compat"],
+      script: workerScript,
+      durableObjects: { TASK_COORDINATOR: { className: "TaskCoordinator", useSQLite: true } },
+      r2Buckets: ["GANTRY_BUCKET"],
+      bindings: {
+        MODAL_SANDBOX_URL: modalServer.url,
+        AGENT_SANDBOX_TOKEN: "mock-token",
+        GOOGLE_GENERATIVE_AI_API_KEY: "mock-key",
+        GOOGLE_GENERATIVE_AI_BASE_URL: geminiServer.url,
+        GANTRY_MODEL: "gemini-test-model",
+      },
+    });
+    try {
+      const marker = "[model-override]";
+      // Straight to the Durable Object, so this test doesn't depend on the Worker's routing or auth.
+      const ns = await other.getDurableObjectNamespace("TASK_COORDINATOR");
+      const stub = ns.get(ns.idFromName("model-override"));
+      await stub.fetch("http://do/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId: "model-override", prompt: `${marker} hello` }),
+      });
+      const deadline = Date.now() + 15_000;
+      let task: any = null;
+      while (Date.now() < deadline) {
+        const res = await stub.fetch("http://do/status");
+        task = ((await res.json()) as { task: any }).task;
+        if (task?.status === "RESOLVED" || task?.status === "FAILED") break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(task.status).toBe("RESOLVED");
+      expect(geminiServer.requestsFor(marker)[0].model).toBe("gemini-test-model");
+      const bucket = await other.getR2Bucket("GANTRY_BUCKET");
+      const { objects } = await bucket.list({ prefix: "telemetry/" });
+      const record = JSON.parse(await (await bucket.get(objects[0].key))!.text());
+      expect(record.model).toBe("gemini-test-model");
+    } finally {
+      await other.dispose();
+    }
   });
 });
