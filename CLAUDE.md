@@ -20,6 +20,8 @@ CI (`.github/workflows/ci.yml`) runs the type-check and the offline tests on Nod
 
 The lakehouse (R2 ingest, compaction, the Modal cron) lives in the separate gantry-lakehouse repo (ADR 0003). The only link is the telemetry the control plane writes to R2; its shape and path are the contract in `docs/telemetry.md`. If you change `AgentTelemetry` or the telemetry key, update that file and bump its version.
 
+Deploying (Modal, Cloudflare, secrets) and the first live run on gantry-lakehouse: `docs/deploy.md`. `scripts/smoke-task.sh owner/name <issue>` starts one issue task on the deployed Worker and checks that its telemetry, with a non-empty patch, reached R2.
+
 ## Architecture
 
 ### Control plane (TypeScript, `apps/control-plane`)
