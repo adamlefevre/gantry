@@ -17,7 +17,7 @@ TypeScript control plane (npm workspaces; root `package.json` workspaces = `apps
 - `make modal-deploy` deploys the execution sandbox (`modal deploy services/execution-sandbox/service.py`); `requirements.txt` holds the Python deps for that.
 - `make sandbox-test` runs the sandbox service's offline tests (`services/execution-sandbox/tests`, deps in `services/execution-sandbox/requirements-test.txt`). `tests/conftest.py` swaps in a fake `modal` package, so they need no Modal account and never call Modal.
 
-CI (`.github/workflows/ci.yml`) runs the type-check and the offline tests on Node 22, and the sandbox service tests on Python 3.11. It needs no secrets.
+CI (`.github/workflows/ci.yml`) runs the type-check and the offline tests on Node 22, and the sandbox service tests on Python 3.11. It needs no secrets. The Deploy workflow (`.github/workflows/deploy.yml`) deploys both services from GitHub when someone runs it, using repository secrets; see `docs/deploy.md`.
 
 The lakehouse (R2 ingest, compaction, the Modal cron) lives in the separate gantry-lakehouse repo (ADR 0003). The only link is the telemetry the control plane writes to R2; its shape and path are the contract in `docs/telemetry.md`. If you change `AgentTelemetry` or the telemetry key, update that file and bump its version.
 
