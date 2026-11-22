@@ -1,4 +1,4 @@
 # Deploying the execution sandbox (services/execution-sandbox/service.py) to Modal.
-modal>=0.60.0
+modal>=1.0
 fastapi>=0.110.0
 pydantic>=2.0.0

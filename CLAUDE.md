@@ -15,8 +15,9 @@ TypeScript control plane (npm workspaces; root `package.json` workspaces = `apps
 - `npm --prefix apps/control-plane run dev` / `deploy` → `wrangler dev` / `wrangler deploy`
 - Type-check: `cd apps/control-plane && npx tsc --noEmit` (there's no lint script)
 - `make modal-deploy` deploys the execution sandbox (`modal deploy services/execution-sandbox/service.py`); `requirements.txt` holds the Python deps for that.
+- `make sandbox-test` runs the sandbox service's offline tests (`services/execution-sandbox/tests`, deps in `services/execution-sandbox/requirements-test.txt`). `tests/conftest.py` swaps in a fake `modal` package, so they need no Modal account and never call Modal.
 
-CI (`.github/workflows/ci.yml`) runs the type-check and the offline tests on Node 22. It needs no secrets.
+CI (`.github/workflows/ci.yml`) runs the type-check and the offline tests on Node 22, and the sandbox service tests on Python 3.11. It needs no secrets.
 
 The lakehouse (R2 ingest, compaction, the Modal cron) lives in the separate gantry-lakehouse repo (ADR 0003). The only link is the telemetry the control plane writes to R2; its shape and path are the contract in `docs/telemetry.md`. If you change `AgentTelemetry` or the telemetry key, update that file and bump its version.
 
@@ -33,7 +34,7 @@ The lakehouse (R2 ingest, compaction, the Modal cron) lives in the separate gant
 - Tests (`apps/control-plane/tests/control-plane.test.ts`) bundle `src/index.ts` with esbuild (`cloudflare:workers` external) and load it into Miniflare with DO + R2 bindings. The mock Modal and Gemini servers live at the repo root (`tests/mock-modal-server.ts`, `tests/mock-gemini-server.ts`) and are re-exported from `apps/control-plane/tests/`. `GOOGLE_GENERATIVE_AI_BASE_URL` points the agent at the mock Gemini server, which picks a scripted sequence of model turns by a marker in the task prompt (`geminiServer.script(marker, turns)`); an unscripted prompt gets "Done." on its first turn.
 
 ### Execution sandbox (`services/execution-sandbox/service.py`)
-- Modal app `agent-sandbox-service`: a FastAPI app served via `@modal.asgi_app()`. It authenticates against the Modal secret `agent-sandbox-secret` (rejects all requests if unset), creates `modal.Sandbox` instances (Debian, Python 3.11, git, pytest and ruff; anything else a target repo needs comes from its `.gantry.yml` `setup:`) and re-attaches to them with `Sandbox.from_id`.
+- Modal app `agent-sandbox-service`: a FastAPI app served via `@modal.asgi_app(label="sandbox-service")`, so its URL is `https://<workspace>--sandbox-service.modal.run`. The endpoint function's `timeout` (960 s) must stay above the longest `/exec` timeout, and `@modal.concurrent` lets one container serve several requests. Sandboxes are created without `app=`, so Modal attaches them to the deployed app. It authenticates against the Modal secret `agent-sandbox-secret` (rejects all requests if unset), creates `modal.Sandbox` instances (Debian, Python 3.11, git, pytest and ruff; anything else a target repo needs comes from its `.gantry.yml` `setup:`) and re-attaches to them with `Sandbox.from_id`.
 - `/session/create` takes optional `{repo_url, ref}` (public `https://` only for now; `ref` is a branch, tag or SHA, default `HEAD`) and shallow-fetches it into `/workspace`. Every later command and file path runs relative to `/workspace`. If the checkout fails, it terminates the sandbox and returns a 422.
 - Untrusted input never goes through a shell, except the agent's own `/exec` command: git, `head` (for `/file/read`, capped at 1 MiB) and the file-write helper get argv, and file content goes over stdin.
 - The resolved repo URL and `ref` are stored on the `tasks` row and forwarded to `/session/create`. Sandboxes live up to 30 minutes; `/exec` accepts `timeout_seconds` up to 900 (setup and test commands use 600).
