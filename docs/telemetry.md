@@ -14,7 +14,7 @@ The factory's only link to the lakehouse ([gantry-lakehouse](https://github.com/
 | Field | Type | Notes |
 |---|---|---|
 | `taskId` | string | |
-| `model` | string | The Gemini model ID: `GANTRY_MODEL`, or `gemini-2.5-flash` by default |
+| `model` | string | The Claude model ID asked for: `GANTRY_MODEL`, or `claude-opus-5-5` by default. Before ADR 0005, records held a Gemini ID such as `gemini-2.5-flash`. |
 | `totalTokens` | number | |
 | `stepsCount` | number | Agent loop steps used |
 | `patch` | string | Final diff from the sandbox (`git add --all --intent-to-add && git diff`), so files the agent created are included |

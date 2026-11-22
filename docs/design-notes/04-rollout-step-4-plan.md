@@ -2,6 +2,7 @@
 
 - Date: 2026-11-10
 - Status: plan. It builds on ADR 0004 (Proposed) and ADR 0001 decision 4.
+- **Later:** ADR 0005 moved the loop off the AI SDK onto the Anthropic SDK. `agent.ts` already runs one model call per turn, so read `generateText({maxSteps: 1})` below as one `messages.create` plus its tool results. Tool calls now run one at a time, so the per-path mutation queue isn't needed, and the mock is `tests/mock-anthropic-server.ts` (`ANTHROPIC_BASE_URL`).
 - Inputs:
   - Vercel's post on building a software factory for the AI SDK (its stages, evidence, run outcomes, and an eval case per failure);
   - eve's harness at `1.0.0-rc.9`, for `edit_file`, `read_file` paging, the read-before-write guard and crash recovery (design note 03).
@@ -150,7 +151,7 @@ interface AgentRunner {
   - 3 resumes end `blocked`.
 - `mock-modal-server.ts` gains fixture repos, so `/exec` can return test pass or fail depending on which files were written, and a "sandbox gone" mode.
 
-Real-model evals (Gemini against fixture issues in gantry-lakehouse) are a separate opt-in `make eval`. They are never part of CI, per AGENTS.md. Each `flawed` run found in production becomes a fixture there, as in the article.
+Real-model evals (Claude against fixture issues in gantry-lakehouse) are a separate opt-in `make eval`. They are never part of CI, per AGENTS.md. Each `flawed` run found in production becomes a fixture there, as in the article.
 
 ## Work breakdown (each slice is one PR that stays green)
 

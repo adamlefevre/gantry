@@ -25,7 +25,7 @@
     }
   ],
   // Secrets (set with `npx wrangler secret put <NAME>`, or in .dev.vars for `wrangler dev`):
-  //   AGENT_SANDBOX_TOKEN, GOOGLE_GENERATIVE_AI_API_KEY
+  //   AGENT_SANDBOX_TOKEN, ANTHROPIC_API_KEY
   "vars": {
     "MODAL_SANDBOX_URL": "https://<your-modal-workspace>--sandbox-service.modal.run"
   }
