@@ -4,6 +4,8 @@ This takes the sandbox service to Modal and the control plane to Cloudflare, the
 
 Steps marked **(you)** need your own accounts or keys. Everything else is a command you can paste.
 
+No terminal handy? [Deploying from GitHub](#deploying-from-github) does sections 3 to 5 from the repo's Actions tab, in any browser.
+
 ## 1. Accounts and tools
 
 1. **(you)** Create a [Modal](https://modal.com) account.
@@ -77,6 +79,33 @@ set -a; source .env; set +a
 The script starts the task, polls its status every 15 seconds for up to 30 minutes, then reads the task's telemetry from R2 and checks that the patch isn't empty. It ends with `First live run passed` or says what failed. While it runs, `wrangler tail` (from `apps/control-plane`) shows the Worker's logs, and the Modal dashboard shows the sandbox.
 
 Nothing is pushed to gantry-lakehouse: the result is a diff in R2. Opening a PR from it is rollout step 3 (the GitHub App).
+
+## Deploying from GitHub
+
+The Deploy workflow (`.github/workflows/deploy.yml`) does sections 3 and 4, and optionally 5, on GitHub's runners, so you need only a browser. It deploys only from `main`.
+
+1. **(you)** On Modal's website: **Settings > API Tokens > New Token**. Keep the token ID and secret.
+2. **(you)** On Cloudflare's dashboard: **My Profile > API Tokens > Create Token**, with the **Edit Cloudflare Workers** template. Make sure it includes **Workers R2 Storage: Edit**, and add it if not. Also copy your **Account ID** from the account's home page.
+3. **(you)** Get an Anthropic API key as in section 1.
+4. **(you)** Make two long random tokens for `AGENT_SANDBOX_TOKEN` and `GANTRY_API_TOKEN`. A 40-character password from a password manager works.
+5. **(you)** On GitHub: the repo's **Settings > Secrets and variables > Actions > New repository secret**. Add each of these:
+
+   | Secret | Value |
+   |---|---|
+   | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | the Modal token from step 1 |
+   | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | the Cloudflare token and account ID from step 2 |
+   | `ANTHROPIC_API_KEY` | your Anthropic key |
+   | `AGENT_SANDBOX_TOKEN`, `GANTRY_API_TOKEN` | the two tokens from step 4 |
+
+6. **(you)** **Actions > Deploy > Run workflow**, on `main`. Leave the target at `both`. To do the first live run in the same go, put a gantry-lakehouse issue number in the issue box.
+
+The run stores `AGENT_SANDBOX_TOKEN` as the Modal secret `agent-sandbox-secret` and sets the Worker's three secrets, so GitHub is the one place to change them. It creates the R2 bucket if it's missing, deploys both services, and checks that each refuses calls without its token. Its summary page shows the two URLs. Keep `GANTRY_API_TOKEN` and the Worker URL to call Gantry yourself.
+
+Optional repository variables (the **Variables** tab, beside Secrets): `GANTRY_MODEL` and `GANTRY_EFFORT` as in section 4, and `MODAL_SANDBOX_URL` and `GANTRY_URL` for runs that deploy only the Worker or can't read a URL from the deploy output.
+
+To deploy automatically after every merge to `main` whose CI passes, uncomment the four `workflow_run` lines at the top of the workflow.
+
+If you also deploy from a terminal, keep the tokens in `.env` the same as the GitHub secrets, because each deploy from GitHub overwrites the Modal and Worker secrets.
 
 ## If it fails
 

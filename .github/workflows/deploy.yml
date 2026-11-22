@@ -1,0 +1,233 @@
+name: Deploy
+
+# Deploys the sandbox service to Modal and the control plane to Cloudflare, and can then run the
+# first live run (scripts/smoke-task.sh). Start it from the Actions tab: Deploy > Run workflow.
+# It reads everything from repository secrets, listed in docs/deploy.md ("Deploying from GitHub").
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: What to deploy
+        type: choice
+        options: [both, sandbox, worker]
+        default: both
+      smoke_issue:
+        description: "Optional: an issue number to run the first live run on, after the deploy"
+        type: string
+        default: ""
+      smoke_repo:
+        description: The repo that issue is in
+        type: string
+        default: adamlefevre/gantry-lakehouse
+  # To deploy automatically after every merge to main whose CI passes, uncomment these four lines.
+  # workflow_run:
+  #   workflows: ["Control plane CI"]
+  #   types: [completed]
+  #   branches: [main]
+
+permissions:
+  contents: read
+
+# One deploy at a time; a second one waits rather than cancelling the first halfway.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+# bash with pipefail, so a failed deploy piped through tee still fails the step.
+defaults:
+  run:
+    shell: bash
+
+env:
+  # The commit CI passed on (automatic deploys), or the one the button was pressed on.
+  DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+  TARGET: ${{ inputs.target || 'both' }}
+
+jobs:
+  sandbox:
+    name: Sandbox service (Modal)
+    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+      && github.ref == 'refs/heads/main'
+      && (inputs.target || 'both') != 'worker'
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      AGENT_SANDBOX_TOKEN: ${{ secrets.AGENT_SANDBOX_TOKEN }}
+      # Modal's output is wrapped at the terminal width; keep the endpoint URL on one line.
+      COLUMNS: "250"
+    steps:
+      - name: Check the secrets are set
+        run: |
+          missing=()
+          for name in MODAL_TOKEN_ID MODAL_TOKEN_SECRET AGENT_SANDBOX_TOKEN; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::Add these repository secrets first (Settings > Secrets and variables > Actions): ${missing[*]}"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the Modal CLI
+        run: pip install -r requirements.txt
+
+      - name: Store the sandbox token as the Modal secret agent-sandbox-secret
+        run: |
+          umask 077
+          file="$RUNNER_TEMP/agent-sandbox-secret.json"
+          python -c 'import json, os; print(json.dumps({"AGENT_SANDBOX_TOKEN": os.environ["AGENT_SANDBOX_TOKEN"]}))' > "$file"
+          modal secret create agent-sandbox-secret --from-json "$file" --force
+          rm -f "$file"
+
+      - name: Deploy
+        id: deploy
+        run: |
+          modal deploy services/execution-sandbox/service.py | tee "$RUNNER_TEMP/modal-deploy.log"
+          url="$(grep -oE 'https://[A-Za-z0-9-]+--sandbox-service[A-Za-z0-9.-]*\.modal\.run' "$RUNNER_TEMP/modal-deploy.log" | head -n 1 || true)"
+          if [[ -n "$url" ]]; then
+            echo "url=$url" >> "$GITHUB_OUTPUT"
+            echo "Sandbox service: $url" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Couldn't read the endpoint URL from Modal's output. Set the repository variable MODAL_SANDBOX_URL to it."
+          fi
+
+      - name: Check it refuses calls without the token
+        if: steps.deploy.outputs.url != ''
+        run: |
+          code="$(curl -s -o /dev/null -w '%{http_code}' --retry 5 --retry-all-errors --retry-delay 5 -X POST "${{ steps.deploy.outputs.url }}/session/create")"
+          echo "POST /session/create without the token: $code (expect 401)"
+          [[ "$code" == "401" ]]
+
+  worker:
+    name: Control plane (Cloudflare)
+    runs-on: ubuntu-latest
+    needs: sandbox
+    # Runs after the sandbox job, or on its own when only the Worker is deployed.
+    if: >-
+      always()
+      && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+      && github.ref == 'refs/heads/main'
+      && (inputs.target || 'both') != 'sandbox'
+      && (needs.sandbox.result == 'success' || needs.sandbox.result == 'skipped')
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      AGENT_SANDBOX_TOKEN: ${{ secrets.AGENT_SANDBOX_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GANTRY_API_TOKEN: ${{ secrets.GANTRY_API_TOKEN }}
+      MODAL_SANDBOX_URL: ${{ needs.sandbox.outputs.url || vars.MODAL_SANDBOX_URL }}
+      GANTRY_MODEL: ${{ vars.GANTRY_MODEL }}
+      GANTRY_EFFORT: ${{ vars.GANTRY_EFFORT }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: apps/control-plane
+    steps:
+      - name: Check the secrets are set
+        working-directory: .
+        run: |
+          missing=()
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID AGENT_SANDBOX_TOKEN ANTHROPIC_API_KEY GANTRY_API_TOKEN; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::Add these repository secrets first (Settings > Secrets and variables > Actions): ${missing[*]}"
+            exit 1
+          fi
+          if [[ -z "$MODAL_SANDBOX_URL" ]]; then
+            echo "::error::No sandbox URL. Deploy the sandbox in the same run, or set the repository variable MODAL_SANDBOX_URL."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        working-directory: .
+        run: npm ci
+
+      - name: Create the R2 bucket if it doesn't exist
+        run: npx wrangler r2 bucket info gantry > /dev/null 2>&1 || npx wrangler r2 bucket create gantry
+
+      - name: Deploy
+        id: deploy
+        run: |
+          args=(--var "MODAL_SANDBOX_URL:$MODAL_SANDBOX_URL")
+          [[ -n "$GANTRY_MODEL" ]] && args+=(--var "GANTRY_MODEL:$GANTRY_MODEL")
+          [[ -n "$GANTRY_EFFORT" ]] && args+=(--var "GANTRY_EFFORT:$GANTRY_EFFORT")
+          npx wrangler deploy "${args[@]}" | tee "$RUNNER_TEMP/wrangler-deploy.log"
+          url="$(grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' "$RUNNER_TEMP/wrangler-deploy.log" | head -n 1 || true)"
+          if [[ -n "$url" ]]; then
+            echo "url=$url" >> "$GITHUB_OUTPUT"
+            echo "Control plane: $url" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Set the Worker's secrets
+        run: |
+          umask 077
+          file="$RUNNER_TEMP/worker-secrets.json"
+          node -e 'const e = process.env; console.log(JSON.stringify({AGENT_SANDBOX_TOKEN: e.AGENT_SANDBOX_TOKEN, ANTHROPIC_API_KEY: e.ANTHROPIC_API_KEY, GANTRY_API_TOKEN: e.GANTRY_API_TOKEN}))' > "$file"
+          npx wrangler secret bulk "$file"
+          rm -f "$file"
+
+      - name: Check it refuses calls without the token
+        if: steps.deploy.outputs.url != ''
+        run: |
+          code="$(curl -s -o /dev/null -w '%{http_code}' --retry 5 --retry-all-errors --retry-delay 5 "${{ steps.deploy.outputs.url }}/api/tasks/ping/status")"
+          echo "GET /api/tasks/ping/status without the token: $code (expect 401)"
+          [[ "$code" == "401" ]]
+
+  first-live-run:
+    name: First live run
+    runs-on: ubuntu-latest
+    needs: worker
+    if: always() && needs.worker.result == 'success' && inputs.smoke_issue != ''
+    timeout-minutes: 40
+    env:
+      GANTRY_URL: ${{ needs.worker.outputs.url || vars.GANTRY_URL }}
+      GANTRY_API_TOKEN: ${{ secrets.GANTRY_API_TOKEN }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      SMOKE_REPO: ${{ inputs.smoke_repo }}
+      SMOKE_ISSUE: ${{ inputs.smoke_issue }}
+    steps:
+      - name: Check the inputs
+        run: |
+          [[ -n "$GANTRY_URL" ]] || { echo "::error::No Worker URL. Set the repository variable GANTRY_URL to it."; exit 1; }
+          [[ "$SMOKE_ISSUE" =~ ^[0-9]+$ ]] || { echo "::error::The issue must be a number."; exit 1; }
+          [[ "$SMOKE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::The repo must look like owner/name."; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run one task and check its diff is in R2
+        run: ./scripts/smoke-task.sh "$SMOKE_REPO" "$SMOKE_ISSUE"
