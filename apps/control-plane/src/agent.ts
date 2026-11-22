@@ -8,19 +8,21 @@ import {
   type GantryConfig,
   type Verification
 } from "./gantryConfig";
+import rawAgentConfig from "../agent-config.json";
+import {
+  fillTemplate,
+  resolveAgentConfig,
+  type AgentConfig,
+  type Effort,
+  type ResolvedAgentConfig
+} from "./agentConfig";
 import { prepareEditArguments } from "./tools/editMatching";
 import { DEFAULT_READ_LIMIT, FileTools, MAX_LINE_LENGTH } from "./tools/fileTools";
 
-/** Claude model used when the GANTRY_MODEL var is unset. */
-export const DEFAULT_MODEL = "claude-opus-5-5";
-/**
- * How hard the model thinks on each turn, when the GANTRY_EFFORT var is unset. Claude Opus 5.5
- * defaults to "medium"; coding work does better at "high".
- */
-export const DEFAULT_EFFORT: Effort = "high";
-export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
-/** Output tokens per model turn. Enough for a whole-file write; small enough to skip streaming. */
-const MAX_OUTPUT_TOKENS = 16_000;
+/** The checked-in default model and effort; agent-config.json is the source, these are for reference. */
+export const DEFAULT_MODEL = rawAgentConfig.model;
+export const DEFAULT_EFFORT = rawAgentConfig.effort as Effort;
+export type { Effort };
 /**
  * Models that take server-side refusal fallbacks. When one of them declines a turn, the API
  * re-runs it on a fallback model it picks by the refusal's category, inside the same call.
@@ -34,13 +36,8 @@ const FALLBACK_BETA = "server-side-fallback-2026-07-01";
  */
 export const DIFF_COMMAND = "git add --all --intent-to-add && git diff";
 
-/** Model turns per task. Setup doesn't count; each turn may call several tools. */
-export const MAX_AGENT_STEPS = 16;
-/** Seconds each setup command and each test run may take inside the sandbox. */
-const SETUP_TIMEOUT_SECONDS = 600;
-const TEST_TIMEOUT_SECONDS = 600;
-/** Command output kept in step records and returned to the model (the tail, where errors are). */
-const MAX_OUTPUT_CHARS = 16_000;
+/** Model turns per task in the checked-in config. */
+export const MAX_AGENT_STEPS = rawAgentConfig.budgets.maxTurns;
 
 interface ExecResult {
   exit_code: number;
@@ -48,7 +45,7 @@ interface ExecResult {
   stderr: string;
 }
 
-function tail(s: string | undefined, max = MAX_OUTPUT_CHARS): string {
+function tail(s: string | undefined, max: number): string {
   if (!s) return "";
   return s.length > max ? `[...${s.length - max} chars truncated]\n` + s.slice(-max) : s;
 }
@@ -63,6 +60,12 @@ export interface StepAudit {
 export interface AgentTelemetry {
   taskId: string;
   model: string;
+  /** Effort level the run asked for. */
+  effort: Effort;
+  /** `version` from agent-config.json. */
+  agentConfigVersion: string;
+  /** Hash of the config the run used, after the GANTRY_MODEL and GANTRY_EFFORT overrides. */
+  agentConfigHash: string;
   totalTokens: number;
   stepsCount: number;
   patch: string;
@@ -85,6 +88,13 @@ export interface AgentLoopOptions {
   repo?: RepoTarget;
   onStep: (step: StepAudit) => void;
   onChunk: (chunk: string) => void;
+  /**
+   * A config to run instead of agent-config.json, in the same shape. For tests and for replaying
+   * tasks against a candidate config; the GANTRY_MODEL and GANTRY_EFFORT overrides still apply.
+   */
+  agentConfig?: unknown;
+  /** Called once the agent config is resolved, before the sandbox starts. */
+  onAgentConfig?: (resolved: ResolvedAgentConfig) => void;
   /** Called once .gantry.yml has been read, before setup runs. */
   onConfig?: (config: GantryConfig, verification: Verification) => void;
 }
@@ -97,15 +107,23 @@ interface AgentTool {
 }
 
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTelemetry> {
-  const { env, prompt, taskId, repo, onStep, onConfig } = options;
+  const { env, prompt, taskId, repo, onStep, onConfig, onAgentConfig } = options;
+
+  const resolved = await resolveAgentConfig(
+    { model: env.GANTRY_MODEL, effort: env.GANTRY_EFFORT },
+    options.agentConfig ?? rawAgentConfig
+  );
+  const agentConfig = resolved.config;
+  const { budgets } = agentConfig;
+  onAgentConfig?.(resolved);
 
   const client = new Anthropic({
     apiKey: env.ANTHROPIC_API_KEY,
     // Unset in production; the tests point it at the mock Anthropic server.
     baseURL: env.ANTHROPIC_BASE_URL || undefined
   });
-  const modelId = env.GANTRY_MODEL || DEFAULT_MODEL;
-  const effort = (env.GANTRY_EFFORT as Effort | undefined) || DEFAULT_EFFORT;
+  const modelId = agentConfig.model;
+  const effort = agentConfig.effort;
 
   // 1. Initialize Modal Sandbox session
   const initRes = await fetch(`${env.MODAL_SANDBOX_URL}/session/create`, {
@@ -189,26 +207,25 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
     for (const command of config.setup) {
       const data = (await callSandbox("/exec", {
         command,
-        timeout_seconds: SETUP_TIMEOUT_SECONDS
+        timeout_seconds: budgets.setupTimeoutSeconds
       })) as ExecResult;
       onStep({
         stepIndex: ++stepCounter,
         toolName: "setup",
         input: { command },
-        output: { exit_code: data.exit_code, stdout: tail(data.stdout), stderr: tail(data.stderr) }
+        output: { exit_code: data.exit_code, stdout: tail(data.stdout, budgets.maxCommandOutputChars), stderr: tail(data.stderr, budgets.maxCommandOutputChars) }
       });
       if (data.exit_code !== 0) {
         throw new Error(`Setup command failed (exit ${data.exit_code}): ${command}\n${tail(data.stderr, 2000)}`);
       }
     }
 
-    // 3. The tools. Sandbox failures in runCommand, getDiff and runTests throw and fail the task;
+    // 3. The tools. Their descriptions come from agent-config.json (below). Sandbox failures in runCommand, getDiff and runTests throw and fail the task;
     //    the file tools hand their errors back to the model.
     const tools: AgentTool[] = [
       {
         definition: {
           name: "runCommand",
-          description: "Execute a bash shell command in the sandbox",
           input_schema: {
             type: "object",
             properties: {
@@ -227,13 +244,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
       {
         definition: {
           name: "readFile",
-          description: [
-            "Read a text file from the repo.",
-            `- Returns up to ${DEFAULT_READ_LIMIT} lines from the start of the file. Each line is prefixed with its number as \`<n>: <text>\`; the prefix is not part of the file.`,
-            "- offset is the 1-based line to start from. When the result is truncated, read on from nextOffset.",
-            `- Lines longer than ${MAX_LINE_LENGTH} characters are cut.`,
-            "- Avoid tiny repeated slices. If you need more context, read a larger window."
-          ].join("\n"),
           input_schema: {
             type: "object",
             properties: {
@@ -254,12 +264,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
       {
         definition: {
           name: "editFile",
-          description: [
-            "Edit one file by exact text replacement. Prefer this to writeFile for changing existing files.",
-            "- Every edits[].oldText must match a unique, non-overlapping region of the original file, including whitespace and newlines. Leave out readFile's line-number prefixes.",
-            "- Batch changes to one file in a single call. Each edit is matched against the original file, not applied one after another.",
-            "- If two changes touch the same block or nearby lines, merge them into one edit. Don't include large unchanged regions just to connect distant changes."
-          ].join("\n"),
           input_schema: {
             type: "object",
             properties: {
@@ -293,11 +297,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
       {
         definition: {
           name: "writeFile",
-          description: [
-            "Write a whole file, creating it or replacing its contents.",
-            "- To change an existing file, prefer editFile.",
-            "- Overwriting an existing file requires reading it with readFile first, and fails if it changed since that read."
-          ].join("\n"),
           input_schema: {
             type: "object",
             properties: {
@@ -314,7 +313,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
       {
         definition: {
           name: "getDiff",
-          description: "Generate a unified git diff patch of all current changes",
           input_schema: { type: "object", properties: {} }
         },
         schema: z.object({}).passthrough(),
@@ -335,22 +333,35 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
       tools.push({
         definition: {
           name: "runTests",
-          description: `Run the repository's test suite (\`${testCommand}\`). Use it to check your fix before finishing.`,
           input_schema: { type: "object", properties: {} }
         },
         schema: z.object({}).passthrough(),
         run: async () => {
           const data = (await callSandbox("/exec", {
             command: testCommand,
-            timeout_seconds: TEST_TIMEOUT_SECONDS
+            timeout_seconds: budgets.testTimeoutSeconds
           })) as ExecResult;
-          const output = { exit_code: data.exit_code, stdout: tail(data.stdout), stderr: tail(data.stderr) };
+          const output = {
+            exit_code: data.exit_code,
+            stdout: tail(data.stdout, budgets.maxCommandOutputChars),
+            stderr: tail(data.stderr, budgets.maxCommandOutputChars)
+          };
           onStep({ stepIndex: ++stepCounter, toolName: "runTests", input: { command: testCommand }, output });
           return output;
         }
       });
     }
-    const toolsByName = new Map(tools.map((t) => [t.definition.name, t]));
+    // The config picks which tools are offered and words what the model sees about each.
+    const descriptionValues = {
+      readLimit: DEFAULT_READ_LIMIT,
+      maxLineLength: MAX_LINE_LENGTH,
+      testCommand: config.test ?? ""
+    };
+    const offered = tools.filter((t) => agentConfig.tools[t.definition.name as keyof AgentConfig["tools"]]);
+    for (const t of offered) {
+      t.definition.description = fillTemplate(agentConfig.tools[t.definition.name as keyof AgentConfig["tools"]]!, descriptionValues);
+    }
+    const toolsByName = new Map(offered.map((t) => [t.definition.name, t]));
 
     /** Runs one tool call and returns its result block. Bad input goes back to the model as an error. */
     const runToolUse = async (block: Anthropic.Beta.BetaToolUseBlock): Promise<Anthropic.Beta.BetaToolResultBlockParam> => {
@@ -369,18 +380,18 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
 
     // 4. The agent loop: one model turn, then every tool call it made, until it stops calling tools.
     //    Each assistant turn goes back exactly as the API returned it, thinking blocks included.
-    const system = buildSystemPrompt({ repo, testCommand: config.test });
+    const system = buildSystemPrompt({ repo, testCommand: config.test }, agentConfig);
     const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: prompt }];
     const useFallbacks = FALLBACK_MODELS.has(modelId);
     let totalTokens = 0;
 
-    for (let turn = 0; turn < MAX_AGENT_STEPS; turn++) {
+    for (let turn = 0; turn < budgets.maxTurns; turn++) {
       const response = await client.beta.messages.create({
         model: modelId,
-        max_tokens: MAX_OUTPUT_TOKENS,
+        max_tokens: budgets.maxOutputTokensPerTurn,
         system,
         messages,
-        tools: tools.map((t) => t.definition),
+        tools: offered.map((t) => t.definition),
         thinking: { type: "adaptive" },
         output_config: { effort },
         // Caches the conversation so far; each turn re-reads it at a tenth of the input price.
@@ -399,6 +410,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
         const category = response.stop_details?.category ?? "unspecified";
         throw new Error(`The model declined to continue (refusal category: ${category}).`);
       }
+      // The token budget is spent: keep what the agent has done and stop, as at the turn budget.
+      if (budgets.maxTotalTokens !== null && totalTokens >= budgets.maxTotalTokens) break;
 
       messages.push({ role: "assistant", content: response.content });
       const toolUses = response.content.filter(
@@ -426,6 +439,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
     return {
       taskId,
       model: modelId,
+      effort,
+      agentConfigVersion: resolved.version,
+      agentConfigHash: resolved.hash,
       totalTokens,
       stepsCount: stepCounter,
       patch: patchRes.stdout || "",
@@ -446,27 +462,17 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
   }
 }
 
-export function buildSystemPrompt(opts: { repo?: RepoTarget; testCommand?: string }): string {
-  const lines = [
-    "You are Gantry's autonomous software engineer.",
-    "You operate inside an isolated Linux sandbox with git, Python and common build tools.",
-  ];
-  if (opts.repo) {
-    lines.push(
-      `The repository ${opts.repo.url} (ref ${opts.repo.ref}) is checked out in your working directory, and its setup commands have already run.`,
-      "If the repo has an AGENTS.md or CLAUDE.md, read it first and follow its conventions."
-    );
-  }
-  lines.push("Investigate the codebase, reproduce the problem, edit files, and verify your fix.");
-  if (opts.testCommand) {
-    lines.push(
-      `This repo's test command is \`${opts.testCommand}\`. Run it with the runTests tool. Add or update a test that covers the fix, and make sure the full suite passes before you finish.`
-    );
-  } else {
-    lines.push(
-      "This repo declares no test command, so your work cannot be verified automatically. Find and run whatever tests exist if you can, and say clearly in your final message what you checked."
-    );
-  }
-  lines.push("When you are done, call getDiff() to produce the final unified patch, then stop.");
-  return lines.join("\n");
+/** The system prompt, built from the config's prompt sections. Defaults to the checked-in config. */
+export function buildSystemPrompt(
+  opts: { repo?: RepoTarget; testCommand?: string },
+  agentConfig: Pick<AgentConfig, "systemPrompt"> = rawAgentConfig as AgentConfig
+): string {
+  const p = agentConfig.systemPrompt;
+  const values = {
+    repoUrl: opts.repo?.url ?? "",
+    ref: opts.repo?.ref ?? "",
+    testCommand: opts.testCommand ?? ""
+  };
+  const sections = [p.intro, ...(opts.repo ? [p.withRepo] : []), p.task, opts.testCommand ? p.withTests : p.withoutTests, p.closing];
+  return sections.map((section) => fillTemplate(section, values)).join("\n");
 }

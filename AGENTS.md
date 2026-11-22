@@ -17,6 +17,7 @@ gantry/
 │       ├── src/
 │       │   ├── index.ts           # Worker router: /api/tasks/:id/{start,status,steps,ws}
 │       │   ├── TaskCoordinator.ts # Durable Object: task state (SQLite), WebSockets, telemetry
+│       │   ├── agentConfig.ts     # Loads and validates agent-config.json (ADR 0006)
 │       │   └── agent.ts           # Agent loop (Anthropic SDK) calling the sandbox API
 │       └── tests/                 # Offline Vitest + Miniflare tests
 ├── services/
