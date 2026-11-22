@@ -5,6 +5,7 @@ import { MockModalServer } from "./mock-modal-server";
 import { MockGitHubServer } from "./mock-github-server";
 import { MockAnthropicServer, toolResultsIn } from "./mock-anthropic-server";
 import { DIFF_COMMAND } from "../src/agent";
+import agentConfigFile from "../agent-config.json";
 
 let mf: Miniflare;
 let modalServer: MockModalServer;
@@ -644,6 +645,28 @@ describe("Telemetry in R2", () => {
     expect(record.patch).toContain("+++ b/tests/test_new.py");
   });
 
+  it("stamps the agent config's version and hash on the record and the task row", async () => {
+    const marker = "[telemetry-config]";
+    anthropicServer.script(marker, [{ text: "Done." }]);
+    const taskId = "telemetry-config";
+    await startTask(taskId, { prompt: `${marker} hello`, repoUrl: "https://github.com/example/telemetry" });
+    const task = await waitForTask(taskId);
+    expect(task.status).toBe("RESOLVED");
+
+    const record = await telemetryFor(taskId);
+    expect(record.agentConfigVersion).toBe(agentConfigFile.version);
+    expect(record.agentConfigHash).toMatch(/^[0-9a-f]{16}$/);
+    expect(record.effort).toBe("high");
+    expect(task.agent_config_version).toBe(agentConfigFile.version);
+    expect(task.agent_config_hash).toBe(record.agentConfigHash);
+
+    // The model sees the config's prompt and tool descriptions.
+    const [request] = anthropicServer.requestsFor(marker);
+    expect(JSON.stringify(request.body.system)).toContain(agentConfigFile.systemPrompt.intro[0]);
+    const runCommand = (request.body.tools as Array<{ name: string; description?: string }>).find((t) => t.name === "runCommand");
+    expect(runCommand?.description).toBe(agentConfigFile.tools.runCommand.join("\n"));
+  });
+
   it("getDiff uses the same command, so the model sees new files too", async () => {
     const marker = "[telemetry-getdiff]";
     anthropicServer.script(marker, [{ toolCalls: [{ name: "getDiff", args: {} }] }, { text: "Done." }]);
@@ -701,6 +724,11 @@ describe("GANTRY_MODEL and GANTRY_EFFORT", () => {
       const { objects } = await bucket.list({ prefix: "telemetry/" });
       const record = JSON.parse(await (await bucket.get(objects[0].key))!.text());
       expect(record.model).toBe("claude-haiku-5-5");
+      expect(record.effort).toBe("low");
+      // Same file, different model and effort: same version, different hash.
+      expect(record.agentConfigVersion).toBe(agentConfigFile.version);
+      expect(record.agentConfigHash).toMatch(/^[0-9a-f]{16}$/);
+      expect(task.agent_config_hash).toBe(record.agentConfigHash);
     } finally {
       await other.dispose();
     }

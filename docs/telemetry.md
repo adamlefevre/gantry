@@ -14,13 +14,18 @@ The factory's only link to the lakehouse ([gantry-lakehouse](https://github.com/
 | Field | Type | Notes |
 |---|---|---|
 | `taskId` | string | |
-| `model` | string | The Claude model ID asked for: `GANTRY_MODEL`, or `claude-opus-5-5` by default. Before ADR 0005, records held a Gemini ID such as `gemini-2.5-flash`. |
+| `model` | string | The Claude model ID asked for: `GANTRY_MODEL`, or `model` in `agent-config.json` (`claude-opus-5-5`). Before ADR 0005, records held a Gemini ID such as `gemini-2.5-flash`. |
+| `effort` | string | Effort level asked for: `GANTRY_EFFORT`, or `effort` in `agent-config.json`. Added with ADR 0006; older records lack it. |
+| `agentConfigVersion` | string | `version` from `apps/control-plane/agent-config.json`. Added with ADR 0006; older records lack it. |
+| `agentConfigHash` | string | 16 hex digits identifying the config the run used, after overrides (ADR 0006). Added with ADR 0006; older records lack it. |
 | `totalTokens` | number | |
 | `stepsCount` | number | Agent loop steps used |
 | `patch` | string | Final diff from the sandbox (`git add --all --intent-to-add && git diff`), so files the agent created are included |
 | `verification` | `"unverified"` \| `"pending"` | See `GLOSSARY.md` |
 | `testCommand` | string \| null | `test:` from `.gantry.yml` |
 | `completedAt` | string | ISO-8601 UTC |
+
+Fields added to v1 are optional for readers: records written before they existed don't have them. Adding a field is a v1 change; renaming, removing or retyping one needs v2.
 
 ## Planned
 

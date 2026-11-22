@@ -14,9 +14,9 @@ export interface Env {
   AGENT_SANDBOX_TOKEN: string;
   /** Anthropic API key for the agent's model calls. Stays in the Worker; never sent to the sandbox. */
   ANTHROPIC_API_KEY: string;
-  /** Claude model ID. Defaults to DEFAULT_MODEL in agent.ts; set it to switch models without a code change. */
+  /** Claude model ID. Overrides `model` in agent-config.json for every run, without a code change. */
   GANTRY_MODEL?: string;
-  /** Effort level per model turn (low, medium, high, xhigh or max). Defaults to DEFAULT_EFFORT in agent.ts. */
+  /** Effort level per model turn (low, medium, high, xhigh or max). Overrides `effort` in agent-config.json. */
   GANTRY_EFFORT?: string;
   /** Defaults to https://api.github.com. */
   GITHUB_API_URL?: string;
@@ -37,6 +37,9 @@ export interface TaskRecord {
   /** Null until .gantry.yml has been read. */
   verification: Verification | null;
   test_command: string | null;
+  /** The agent config the run used (agent-config.json `version`, and the hash after overrides). */
+  agent_config_version: string | null;
+  agent_config_hash: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -94,6 +97,8 @@ export class TaskCoordinator extends DurableObject<Env> {
       ["issue_url", "TEXT"],
       ["verification", "TEXT"],
       ["test_command", "TEXT"],
+      ["agent_config_version", "TEXT"],
+      ["agent_config_hash", "TEXT"],
     ];
     for (const [col, type] of added) {
       if (!cols.includes(col)) this.sql.exec(`ALTER TABLE tasks ADD COLUMN ${col} ${type}`);
@@ -204,6 +209,12 @@ export class TaskCoordinator extends DurableObject<Env> {
         prompt,
         taskId,
         repo,
+        onAgentConfig: ({ version, hash }) => {
+          this.sql.exec(
+            `UPDATE tasks SET agent_config_version = ?, agent_config_hash = ?, updated_at = ? WHERE id = ?`,
+            version, hash, new Date().toISOString(), taskId
+          );
+        },
         onConfig: (config, verification) => {
           this.sql.exec(
             `UPDATE tasks SET verification = ?, test_command = ?, updated_at = ? WHERE id = ?`,
