@@ -1,5 +1,4 @@
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { generateText, tool, type ToolSet } from "ai";
+import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import type { Env } from "./TaskCoordinator";
 import {
@@ -12,7 +11,30 @@ import {
 import { prepareEditArguments } from "./tools/editMatching";
 import { DEFAULT_READ_LIMIT, FileTools, MAX_LINE_LENGTH } from "./tools/fileTools";
 
-/** LLM round-trips per task. Setup doesn't count; each tool call (including runTests) does. */
+/** Claude model used when the GANTRY_MODEL var is unset. */
+export const DEFAULT_MODEL = "claude-opus-5-5";
+/**
+ * How hard the model thinks on each turn, when the GANTRY_EFFORT var is unset. Claude Opus 5.5
+ * defaults to "medium"; coding work does better at "high".
+ */
+export const DEFAULT_EFFORT: Effort = "high";
+export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+/** Output tokens per model turn. Enough for a whole-file write; small enough to skip streaming. */
+const MAX_OUTPUT_TOKENS = 16_000;
+/**
+ * Models that take server-side refusal fallbacks. When one of them declines a turn, the API
+ * re-runs it on a fallback model it picks by the refusal's category, inside the same call.
+ */
+const FALLBACK_MODELS = new Set(["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-fable-5-2"]);
+const FALLBACK_BETA = "server-side-fallback-2026-07-01";
+/**
+ * The patch the agent sees from getDiff and the factory keeps at the end. A plain `git diff`
+ * leaves out files the agent created (they're untracked), so new tests and modules would be
+ * missing from the patch. `git add --intent-to-add` makes them show up as new files.
+ */
+export const DIFF_COMMAND = "git add --all --intent-to-add && git diff";
+
+/** Model turns per task. Setup doesn't count; each turn may call several tools. */
 export const MAX_AGENT_STEPS = 16;
 /** Seconds each setup command and each test run may take inside the sandbox. */
 const SETUP_TIMEOUT_SECONDS = 600;
@@ -67,15 +89,23 @@ export interface AgentLoopOptions {
   onConfig?: (config: GantryConfig, verification: Verification) => void;
 }
 
+/** A tool the model can call: its definition, the schema its input must pass, and its body. */
+interface AgentTool {
+  definition: Anthropic.Beta.BetaTool;
+  schema: z.ZodType<any>;
+  run: (input: any) => Promise<unknown>;
+}
+
 export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTelemetry> {
   const { env, prompt, taskId, repo, onStep, onConfig } = options;
 
-  const google = createGoogleGenerativeAI({
-    apiKey: env.GOOGLE_GENERATIVE_AI_API_KEY,
-    // Unset in production; the tests point it at the mock Gemini server.
-    baseURL: env.GOOGLE_GENERATIVE_AI_BASE_URL
+  const client = new Anthropic({
+    apiKey: env.ANTHROPIC_API_KEY,
+    // Unset in production; the tests point it at the mock Anthropic server.
+    baseURL: env.ANTHROPIC_BASE_URL || undefined
   });
-  const model = google("gemini-2.5-flash");
+  const modelId = env.GANTRY_MODEL || DEFAULT_MODEL;
+  const effort = (env.GANTRY_EFFORT as Effort | undefined) || DEFAULT_EFFORT;
 
   // 1. Initialize Modal Sandbox session
   const initRes = await fetch(`${env.MODAL_SANDBOX_URL}/session/create`, {
@@ -134,8 +164,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
   });
 
   /**
-   * Runs a tool body, records the step, and hands errors back to the model as `{error}`.
-   * In AI SDK v4 a thrown tool error would abort the whole loop instead.
+   * Runs a tool body, records the step, and hands errors back to the model as `{error}`, so a
+   * bad path or a stale edit is something the model can fix rather than the end of the task.
    */
   const audited = async <T>(toolName: string, input: Record<string, unknown>, run: () => Promise<T>) => {
     let output: T | { error: string };
@@ -172,49 +202,31 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
       }
     }
 
-    // 3. The agent loop.
-    const testTools: ToolSet = config.test
-      ? {
-          runTests: tool({
-            description: `Run the repository's test suite (\`${config.test}\`). Use it to check your fix before finishing.`,
-            parameters: z.object({}),
-            execute: async () => {
-              const data = (await callSandbox("/exec", {
-                command: config.test,
-                timeout_seconds: TEST_TIMEOUT_SECONDS
-              })) as ExecResult;
-              const output = { exit_code: data.exit_code, stdout: tail(data.stdout), stderr: tail(data.stderr) };
-              onStep({ stepIndex: ++stepCounter, toolName: "runTests", input: { command: config.test }, output });
-              return output;
-            }
-          })
-        }
-      : {};
-
-    const result = await generateText({
-      model,
-      system: buildSystemPrompt({ repo, testCommand: config.test }),
-      prompt,
-      maxSteps: MAX_AGENT_STEPS,
-      tools: {
-        runCommand: tool({
+    // 3. The tools. Sandbox failures in runCommand, getDiff and runTests throw and fail the task;
+    //    the file tools hand their errors back to the model.
+    const tools: AgentTool[] = [
+      {
+        definition: {
+          name: "runCommand",
           description: "Execute a bash shell command in the sandbox",
-          parameters: z.object({
-            command: z.string().describe("The bash command to execute (e.g. pytest, git status)")
-          }),
-          execute: async ({ command }) => {
-            const data = await callSandbox("/exec", { command });
-            onStep({
-              stepIndex: ++stepCounter,
-              toolName: "runCommand",
-              input: { command },
-              output: data
-            });
-            return data;
+          input_schema: {
+            type: "object",
+            properties: {
+              command: { type: "string", description: "The bash command to execute (e.g. pytest, git status)" }
+            },
+            required: ["command"]
           }
-        }),
-
-        readFile: tool({
+        },
+        schema: z.object({ command: z.string() }),
+        run: async ({ command }: { command: string }) => {
+          const data = await callSandbox("/exec", { command });
+          onStep({ stepIndex: ++stepCounter, toolName: "runCommand", input: { command }, output: data });
+          return data;
+        }
+      },
+      {
+        definition: {
+          name: "readFile",
           description: [
             "Read a text file from the repo.",
             `- Returns up to ${DEFAULT_READ_LIMIT} lines from the start of the file. Each line is prefixed with its number as \`<n>: <text>\`; the prefix is not part of the file.`,
@@ -222,79 +234,199 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
             `- Lines longer than ${MAX_LINE_LENGTH} characters are cut.`,
             "- Avoid tiny repeated slices. If you need more context, read a larger window."
           ].join("\n"),
-          parameters: z.object({
-            path: z.string().describe("File path relative to the repo root"),
-            offset: z.number().int().optional().describe("1-based line number to start from. Defaults to 1."),
-            limit: z.number().int().optional().describe(`Maximum number of lines to return. Defaults to ${DEFAULT_READ_LIMIT}.`)
-          }),
-          execute: (input) => audited("readFile", input, () => fileTools.readFile(input))
+          input_schema: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "File path relative to the repo root" },
+              offset: { type: "integer", description: "1-based line number to start from. Defaults to 1." },
+              limit: { type: "integer", description: `Maximum number of lines to return. Defaults to ${DEFAULT_READ_LIMIT}.` }
+            },
+            required: ["path"]
+          }
+        },
+        schema: z.object({
+          path: z.string(),
+          offset: z.number().int().optional(),
+          limit: z.number().int().optional()
         }),
-
-        editFile: tool({
+        run: (input) => audited("readFile", input, () => fileTools.readFile(input))
+      },
+      {
+        definition: {
+          name: "editFile",
           description: [
             "Edit one file by exact text replacement. Prefer this to writeFile for changing existing files.",
             "- Every edits[].oldText must match a unique, non-overlapping region of the original file, including whitespace and newlines. Leave out readFile's line-number prefixes.",
             "- Batch changes to one file in a single call. Each edit is matched against the original file, not applied one after another.",
             "- If two changes touch the same block or nearby lines, merge them into one edit. Don't include large unchanged regions just to connect distant changes."
           ].join("\n"),
-          parameters: z.preprocess(
-            prepareEditArguments,
-            z.object({
-              path: z.string().describe("File path relative to the repo root"),
-              edits: z
-                .array(
-                  z.object({
-                    oldText: z.string().describe("Exact text to replace. Must be unique in the original file."),
-                    newText: z.string().describe("Replacement text.")
-                  })
-                )
-                .describe("One or more targeted, non-overlapping replacements.")
-            })
-          ),
-          execute: (input) =>
-            audited("editFile", { path: input.path, edits: input.edits.length }, () => fileTools.editFile(input))
-        }),
-
-        writeFile: tool({
+          input_schema: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "File path relative to the repo root" },
+              edits: {
+                type: "array",
+                description: "One or more targeted, non-overlapping replacements.",
+                items: {
+                  type: "object",
+                  properties: {
+                    oldText: { type: "string", description: "Exact text to replace. Must be unique in the original file." },
+                    newText: { type: "string", description: "Replacement text." }
+                  },
+                  required: ["oldText", "newText"]
+                }
+              }
+            },
+            required: ["path", "edits"]
+          }
+        },
+        schema: z.preprocess(
+          prepareEditArguments,
+          z.object({
+            path: z.string(),
+            edits: z.array(z.object({ oldText: z.string(), newText: z.string() }))
+          })
+        ),
+        run: (input) =>
+          audited("editFile", { path: input.path, edits: input.edits.length }, () => fileTools.editFile(input))
+      },
+      {
+        definition: {
+          name: "writeFile",
           description: [
             "Write a whole file, creating it or replacing its contents.",
             "- To change an existing file, prefer editFile.",
             "- Overwriting an existing file requires reading it with readFile first, and fails if it changed since that read."
           ].join("\n"),
-          parameters: z.object({
-            path: z.string().describe("File path relative to the repo root"),
-            content: z.string().describe("Complete file contents")
-          }),
-          execute: ({ path, content }) =>
-            audited("writeFile", { path, contentLength: content.length }, () => fileTools.writeFile({ path, content }))
-        }),
-
-        getDiff: tool({
-          description: "Generate a unified git diff patch of all current changes",
-          parameters: z.object({}),
-          execute: async () => {
-            const data = (await callSandbox("/exec", { command: "git diff" })) as { stdout: string };
-            onStep({
-              stepIndex: ++stepCounter,
-              toolName: "getDiff",
-              input: {},
-              output: { patchLength: data.stdout?.length ?? 0 }
-            });
-            return { patch: data.stdout || "" };
+          input_schema: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "File path relative to the repo root" },
+              content: { type: "string", description: "Complete file contents" }
+            },
+            required: ["path", "content"]
           }
-        }),
-
-        ...testTools
+        },
+        schema: z.object({ path: z.string(), content: z.string() }),
+        run: ({ path, content }: { path: string; content: string }) =>
+          audited("writeFile", { path, contentLength: content.length }, () => fileTools.writeFile({ path, content }))
+      },
+      {
+        definition: {
+          name: "getDiff",
+          description: "Generate a unified git diff patch of all current changes",
+          input_schema: { type: "object", properties: {} }
+        },
+        schema: z.object({}).passthrough(),
+        run: async () => {
+          const data = (await callSandbox("/exec", { command: DIFF_COMMAND })) as { stdout: string };
+          onStep({
+            stepIndex: ++stepCounter,
+            toolName: "getDiff",
+            input: {},
+            output: { patchLength: data.stdout?.length ?? 0 }
+          });
+          return { patch: data.stdout || "" };
+        }
       }
-    });
+    ];
+    if (config.test) {
+      const testCommand = config.test;
+      tools.push({
+        definition: {
+          name: "runTests",
+          description: `Run the repository's test suite (\`${testCommand}\`). Use it to check your fix before finishing.`,
+          input_schema: { type: "object", properties: {} }
+        },
+        schema: z.object({}).passthrough(),
+        run: async () => {
+          const data = (await callSandbox("/exec", {
+            command: testCommand,
+            timeout_seconds: TEST_TIMEOUT_SECONDS
+          })) as ExecResult;
+          const output = { exit_code: data.exit_code, stdout: tail(data.stdout), stderr: tail(data.stderr) };
+          onStep({ stepIndex: ++stepCounter, toolName: "runTests", input: { command: testCommand }, output });
+          return output;
+        }
+      });
+    }
+    const toolsByName = new Map(tools.map((t) => [t.definition.name, t]));
+
+    /** Runs one tool call and returns its result block. Bad input goes back to the model as an error. */
+    const runToolUse = async (block: Anthropic.Beta.BetaToolUseBlock): Promise<Anthropic.Beta.BetaToolResultBlockParam> => {
+      const agentTool = toolsByName.get(block.name);
+      const parsed = agentTool?.schema.safeParse(block.input);
+      if (!agentTool || !parsed?.success) {
+        const error = agentTool
+          ? `Invalid input for ${block.name}: ${parsed!.error!.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; ")}`
+          : `Unknown tool: ${block.name}`;
+        onStep({ stepIndex: ++stepCounter, toolName: block.name, input: { invalid: true }, output: { error } });
+        return { type: "tool_result", tool_use_id: block.id, content: JSON.stringify({ error }), is_error: true };
+      }
+      const output = await agentTool.run(parsed.data);
+      return { type: "tool_result", tool_use_id: block.id, content: JSON.stringify(output) };
+    };
+
+    // 4. The agent loop: one model turn, then every tool call it made, until it stops calling tools.
+    //    Each assistant turn goes back exactly as the API returned it, thinking blocks included.
+    const system = buildSystemPrompt({ repo, testCommand: config.test });
+    const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: prompt }];
+    const useFallbacks = FALLBACK_MODELS.has(modelId);
+    let totalTokens = 0;
+
+    for (let turn = 0; turn < MAX_AGENT_STEPS; turn++) {
+      const response = await client.beta.messages.create({
+        model: modelId,
+        max_tokens: MAX_OUTPUT_TOKENS,
+        system,
+        messages,
+        tools: tools.map((t) => t.definition),
+        thinking: { type: "adaptive" },
+        output_config: { effort },
+        // Caches the conversation so far; each turn re-reads it at a tenth of the input price.
+        cache_control: { type: "ephemeral" },
+        ...(useFallbacks ? { betas: [FALLBACK_BETA], fallbacks: "default" as const } : {})
+      });
+
+      const usage = response.usage;
+      totalTokens +=
+        usage.input_tokens +
+        usage.output_tokens +
+        (usage.cache_creation_input_tokens ?? 0) +
+        (usage.cache_read_input_tokens ?? 0);
+
+      if (response.stop_reason === "refusal") {
+        const category = response.stop_details?.category ?? "unspecified";
+        throw new Error(`The model declined to continue (refusal category: ${category}).`);
+      }
+
+      messages.push({ role: "assistant", content: response.content });
+      const toolUses = response.content.filter(
+        (b): b is Anthropic.Beta.BetaToolUseBlock => b.type === "tool_use"
+      );
+
+      if (toolUses.length > 0) {
+        // All results go back together in one user message.
+        const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
+        for (const block of toolUses) results.push(await runToolUse(block));
+        messages.push({ role: "user", content: results });
+        continue;
+      }
+      if (response.stop_reason === "pause_turn") continue;
+      if (response.stop_reason === "max_tokens") {
+        messages.push({ role: "user", content: "Your reply hit the output limit. Continue, in smaller steps." });
+        continue;
+      }
+      break;
+    }
 
     // Capture final patch
-    const patchRes = (await callSandbox("/exec", { command: "git diff" })) as { stdout: string };
+    const patchRes = (await callSandbox("/exec", { command: DIFF_COMMAND })) as { stdout: string };
 
     return {
       taskId,
-      model: "gemini-2.5-flash",
-      totalTokens: result.usage?.totalTokens ?? 0,
+      model: modelId,
+      totalTokens,
       stepsCount: stepCounter,
       patch: patchRes.stdout || "",
       verification,

@@ -2,7 +2,7 @@
 
 ## Architecture & Goals
 Gantry is an open-source agentic software factory: label an issue in any GitHub repo and get back a verified PR.
-1. **Control plane:** a TypeScript Cloudflare Worker with one Durable Object per task. It runs our own coding-agent loop (Vercel AI SDK) and streams progress over WebSockets.
+1. **Control plane:** a TypeScript Cloudflare Worker with one Durable Object per task. It runs our own coding-agent loop (Claude, through the Anthropic SDK) and streams progress over WebSockets.
 2. **Execution sandbox:** a Modal FastAPI service that creates an isolated sandbox per task, with the target repo checked out. It is a dumb execution layer.
 3. **Verification:** the factory, not the agent, decides whether a change works (red-green, driven by the target repo's `.gantry.yml`). See `docs/adr/0001-software-factory-for-any-repo.md`.
 4. **Telemetry:** every task writes a telemetry record to R2. The lakehouse that stores and compacts it lives in a separate repo, [gantry-lakehouse](https://github.com/adamlefevre/gantry-lakehouse), which is also the factory's first target repo. The record and path layout are a versioned contract: `docs/telemetry.md`. See `docs/adr/0003-lakehouse-in-its-own-repo.md`.
@@ -17,7 +17,7 @@ gantry/
 │       ├── src/
 │       │   ├── index.ts           # Worker router: /api/tasks/:id/{start,status,steps,ws}
 │       │   ├── TaskCoordinator.ts # Durable Object: task state (SQLite), WebSockets, telemetry
-│       │   └── agent.ts           # Agent loop (Vercel AI SDK) calling the sandbox API
+│       │   └── agent.ts           # Agent loop (Anthropic SDK) calling the sandbox API
 │       └── tests/                 # Offline Vitest + Miniflare tests
 ├── services/
 │   └── execution-sandbox/
@@ -40,7 +40,7 @@ gantry/
 - Worker secrets go through `wrangler secret put` (or `.dev.vars` locally); sandbox secrets through `modal.Secret`. Model API keys stay in the Worker and never reach the sandbox.
 - The control plane writes to R2 only through the `GANTRY_BUCKET` binding, and only under `telemetry/` (see `docs/telemetry.md`).
 - Target-repo content (issues, `.gantry.yml`, code) is untrusted. It runs only inside the sandbox.
-- Tests stay offline: Miniflare plus the mock Modal, GitHub and Gemini servers. No test may call a real external service.
+- Tests stay offline: Miniflare plus the mock Modal, GitHub and Anthropic servers. No test may call a real external service.
 
 ## Agent skills
 

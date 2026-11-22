@@ -18,7 +18,7 @@ The goal is a factory: label an issue in any repo and get back a verified PR.
 1. **The agent loop is our own, built on the Vercel AI SDK.**
    - `agent.ts` drives the loop with `generateText` and tool calls (`runCommand`, `writeFile`, `readFile`, `getDiff`) against the Modal sandbox API. The sandbox stays a dumb execution layer.
    - We build the loop ourselves on purpose: it is the part of the project we want to show, and owning it lets the factory record every step, token and cost as telemetry.
-   - The model provider sits behind the AI SDK, so it can be swapped (Gemini today).
+   - The model provider sits behind the AI SDK, so it can be swapped (Gemini today). (Amended by ADR 0005, proposed: the loop calls Claude through the Anthropic SDK.)
    - Model API keys stay in the Worker. The sandbox never sees them.
    - Rejected: running an existing headless coding agent CLI inside the sandbox. It would be stronger out of the box, but it hides the loop, puts the model key inside the sandbox, and makes telemetry depend on someone else's output format.
 

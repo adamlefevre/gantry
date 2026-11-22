@@ -14,13 +14,18 @@ export interface Env {
   GANTRY_API_TOKEN?: string;
   MODAL_SANDBOX_URL: string;
   AGENT_SANDBOX_TOKEN: string;
-  GOOGLE_GENERATIVE_AI_API_KEY: string;
+  /** Anthropic API key for the agent's model calls. Stays in the Worker; never sent to the sandbox. */
+  ANTHROPIC_API_KEY: string;
+  /** Claude model ID. Defaults to DEFAULT_MODEL in agent.ts; set it to switch models without a code change. */
+  GANTRY_MODEL?: string;
+  /** Effort level per model turn (low, medium, high, xhigh or max). Defaults to DEFAULT_EFFORT in agent.ts. */
+  GANTRY_EFFORT?: string;
   /** Defaults to https://api.github.com. */
   GITHUB_API_URL?: string;
   /** Optional token for the GitHub API. Step 3 replaces it with a GitHub App installation token. */
   GITHUB_TOKEN?: string;
-  /** Gemini API base URL. Defaults to Google's; the tests point it at the mock Gemini server. */
-  GOOGLE_GENERATIVE_AI_BASE_URL?: string;
+  /** Anthropic API base URL. Defaults to Anthropic's; the tests point it at the mock Anthropic server. */
+  ANTHROPIC_BASE_URL?: string;
 }
 
 export interface TaskRecord {

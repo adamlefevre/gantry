@@ -3,12 +3,13 @@ import { Miniflare } from "miniflare";
 import esbuild from "esbuild";
 import { MockModalServer } from "./mock-modal-server";
 import { MockGitHubServer } from "./mock-github-server";
-import { MockGeminiServer, toolResultsIn } from "./mock-gemini-server";
+import { MockAnthropicServer, toolResultsIn } from "./mock-anthropic-server";
+import { DIFF_COMMAND } from "../src/agent";
 
 let mf: Miniflare;
 let modalServer: MockModalServer;
 let githubServer: MockGitHubServer;
-let geminiServer: MockGeminiServer;
+let anthropicServer: MockAnthropicServer;
 let workerScript: string;
 /** Miniflare's own dispatchFetch, without the default Authorization header the tests add. */
 let rawDispatch: Miniflare["dispatchFetch"];
@@ -21,8 +22,8 @@ beforeAll(async () => {
   await modalServer.start();
   githubServer = new MockGitHubServer();
   await githubServer.start();
-  geminiServer = new MockGeminiServer();
-  await geminiServer.start();
+  anthropicServer = new MockAnthropicServer();
+  await anthropicServer.start();
 
   // 2. Bundle the worker entry with esbuild so Miniflare can load it
   const build = await esbuild.build({
@@ -32,7 +33,7 @@ beforeAll(async () => {
     write: false,
     external: ["cloudflare:workers"],
     target: "es2022",
-    // Inline the ai-sdk so the agent module resolves inside workerd
+    // Inline the Anthropic SDK so the agent module resolves inside workerd
     platform: "browser",
     conditions: ["workerd", "worker", "browser"],
   });
@@ -51,8 +52,8 @@ beforeAll(async () => {
     bindings: {
       MODAL_SANDBOX_URL: modalServer.url,
       AGENT_SANDBOX_TOKEN: "mock-token",
-      GOOGLE_GENERATIVE_AI_API_KEY: "mock-key",
-      GOOGLE_GENERATIVE_AI_BASE_URL: geminiServer.url,
+      ANTHROPIC_API_KEY: "mock-key",
+      ANTHROPIC_BASE_URL: anthropicServer.url,
       GITHUB_API_URL: githubServer.url,
       GANTRY_API_TOKEN: API_TOKEN,
     },
@@ -74,7 +75,7 @@ afterAll(async () => {
   await mf?.dispose();
   await modalServer?.stop();
   await githubServer?.stop();
-  await geminiServer?.stop();
+  await anthropicServer?.stop();
 });
 
 // ──────────────────────────────────────────────────────
@@ -183,8 +184,8 @@ describe("Task start + agent loop (mocked Modal)", () => {
     expect(task.id).toBe(TASK_ID);
     // No script matches this prompt, so the mock model answers "Done." on its first turn.
     expect(task.status).toBe("RESOLVED");
-    const [llmCall] = geminiServer.requestsFor("Fix the compaction pipeline");
-    expect(llmCall).toMatchObject({ model: "gemini-2.5-flash", apiKey: "mock-key" });
+    const [llmCall] = anthropicServer.requestsFor("Fix the compaction pipeline");
+    expect(llmCall).toMatchObject({ model: "claude-opus-5-5", apiKey: "mock-key" });
     expect(task.prompt).toBe("Fix the compaction pipeline in pipelines/compact.py");
     expect(task.created_at).toBeTruthy();
     expect(task.updated_at).toBeTruthy();
@@ -461,7 +462,7 @@ describe(".gantry.yml", () => {
     await startTask(taskId, { prompt: "fix it", repoUrl: "https://github.com/example/no-config" });
     const task = await waitForTask(taskId);
     expect(task).toMatchObject({ verification: "unverified", test_command: null });
-    expect(sessionFor(taskId)!.commands.filter((c) => c !== "git diff")).toEqual([]);
+    expect(sessionFor(taskId)!.commands.filter((c) => c !== DIFF_COMMAND)).toEqual([]);
   });
 
   it("runs setup but stays unverified when .gantry.yml has no test:", async () => {
@@ -499,7 +500,7 @@ describe(".gantry.yml", () => {
   });
 });
 
-describe("Agent loop tools (mock Gemini)", () => {
+describe("Agent loop tools (mock Anthropic)", () => {
   const repoUrl = "https://github.com/example/tools";
   const COUNT_PY = "def count(xs):\n    return len(xs) + 1\n";
 
@@ -514,7 +515,7 @@ describe("Agent loop tools (mock Gemini)", () => {
 
   it("reads, edits and diffs a file through the loop", async () => {
     const marker = "[loop-read-edit]";
-    geminiServer.script(marker, [
+    anthropicServer.script(marker, [
       { toolCalls: [{ name: "readFile", args: { path: "src/count.py" } }] },
       {
         toolCalls: [{
@@ -532,7 +533,7 @@ describe("Agent loop tools (mock Gemini)", () => {
     expect(task.status).toBe("RESOLVED");
     expect(sessionFor(taskId)!.files.get("src/count.py")).toBe("def count(xs):\n    return len(xs)\n");
 
-    const results = toolResultsIn(geminiServer.requestsFor(marker).at(-1)!);
+    const results = toolResultsIn(anthropicServer.requestsFor(marker).at(-1)!);
     expect(results.map((r) => r.name)).toEqual(["readFile", "editFile", "getDiff"]);
     expect(results[0].result).toMatchObject({
       path: "src/count.py",
@@ -548,14 +549,14 @@ describe("Agent loop tools (mock Gemini)", () => {
 
   it("writes a new file without reading it first", async () => {
     const marker = "[loop-write-new]";
-    geminiServer.script(marker, [
+    anthropicServer.script(marker, [
       { toolCalls: [{ name: "writeFile", args: { path: "src/new.py", content: "X = 1\n" } }] },
     ]);
     const taskId = "loop-write-new";
     await startTask(taskId, { prompt: `${marker} add a file`, repoUrl });
     expect((await waitForTask(taskId)).status).toBe("RESOLVED");
     expect(sessionFor(taskId)!.files.get("src/new.py")).toBe("X = 1\n");
-    const [write] = toolResultsIn(geminiServer.requestsFor(marker).at(-1)!);
+    const [write] = toolResultsIn(anthropicServer.requestsFor(marker).at(-1)!);
     expect(write.result).toEqual({ path: "src/new.py", existed: false });
   });
 
@@ -577,14 +578,14 @@ describe("Agent loop tools (mock Gemini)", () => {
     ],
   ])("returns {error} to the model for %s, and the task still resolves", async (name, call, message) => {
     const marker = `[loop-error-${name}]`;
-    geminiServer.script(marker, [{ toolCalls: [call] }, { text: "Giving up." }]);
+    anthropicServer.script(marker, [{ toolCalls: [call] }, { text: "Giving up." }]);
     const taskId = `loop-error-${call.name}`;
     await startTask(taskId, { prompt: `${marker} try it`, repoUrl });
     const task = await waitForTask(taskId);
 
     expect(task.status).toBe("RESOLVED");
     expect(sessionFor(taskId)!.files.has("src/count.py")).toBe(false);
-    const [result] = toolResultsIn(geminiServer.requestsFor(marker).at(-1)!);
+    const [result] = toolResultsIn(anthropicServer.requestsFor(marker).at(-1)!);
     expect(result.name).toBe(call.name);
     expect(result.result.error).toMatch(message);
 
@@ -598,29 +599,176 @@ describe("Agent loop tools (mock Gemini)", () => {
     modalServer.repoFiles.set(withTests, { ".gantry.yml": "test: pytest -q\n" });
     modalServer.commandResults.set("pytest -q", { exit_code: 1, stdout: "1 failed" });
     const marker = "[loop-run-tests]";
-    geminiServer.script(marker, [{ toolCalls: [{ name: "runTests", args: {} }] }]);
+    anthropicServer.script(marker, [{ toolCalls: [{ name: "runTests", args: {} }] }]);
     const taskId = "loop-run-tests";
     await startTask(taskId, { prompt: `${marker} run them`, repoUrl: withTests });
     expect((await waitForTask(taskId)).status).toBe("RESOLVED");
 
-    const requests = geminiServer.requestsFor(marker);
+    const requests = anthropicServer.requestsFor(marker);
     expect(JSON.stringify(requests[0].body.tools)).toContain("runTests");
     const [result] = toolResultsIn(requests.at(-1)!);
     expect(result).toMatchObject({ name: "runTests", result: { exit_code: 1, stdout: "1 failed" } });
 
     // A repo without a test command never sees the tool.
-    const [plain] = geminiServer.requestsFor("[loop-write-new]");
+    const [plain] = anthropicServer.requestsFor("[loop-write-new]");
     expect(JSON.stringify(plain.body.tools)).not.toContain("runTests");
+  });
+
+  it("calls Claude with adaptive thinking, high effort, prompt caching and refusal fallbacks", async () => {
+    const marker = "[loop-request-shape]";
+    anthropicServer.script(marker, [{ toolCalls: [{ name: "getDiff", args: {} }] }, { text: "Done." }]);
+    const taskId = "loop-request-shape";
+    await startTask(taskId, { prompt: `${marker} look`, repoUrl });
+    expect((await waitForTask(taskId)).status).toBe("RESOLVED");
+
+    const [first, second] = anthropicServer.requestsFor(marker);
+    expect(first).toMatchObject({ model: "claude-opus-5-5", apiKey: "mock-key" });
+    expect(first.beta).toContain("server-side-fallback-2026-07-01");
+    expect(first.body).toMatchObject({
+      max_tokens: 16000,
+      thinking: { type: "adaptive" },
+      output_config: { effort: "high" },
+      cache_control: { type: "ephemeral" },
+      fallbacks: "default",
+    });
+    expect(first.body.system).toContain("Gantry's autonomous software engineer");
+    // Claude Opus 5.5 rejects forced tool choice and sampling parameters.
+    expect(first.body).not.toHaveProperty("tool_choice");
+    expect(first.body).not.toHaveProperty("temperature");
+    expect(first.body.tools!.map((t) => t.name)).toEqual(["runCommand", "readFile", "editFile", "writeFile", "getDiff"]);
+
+    // The assistant turn goes back exactly as returned, thinking block first, then all results together.
+    const [, assistant, results] = second.body.messages;
+    expect(assistant.role).toBe("assistant");
+    expect((assistant.content as any[])[0]).toEqual({ type: "thinking", thinking: "", signature: "sig-0" });
+    expect(results.role).toBe("user");
+    expect((results.content as any[]).map((b) => b.type)).toEqual(["tool_result"]);
+  });
+
+  it("sends invalid tool input back to the model as an error, and the task still resolves", async () => {
+    const marker = "[loop-invalid-input]";
+    anthropicServer.script(marker, [
+      { toolCalls: [{ name: "readFile", args: { offset: 3 } }, { name: "noSuchTool", args: {} }] },
+      { text: "Sorry." },
+    ]);
+    const taskId = "loop-invalid-input";
+    await startTask(taskId, { prompt: `${marker} oops`, repoUrl });
+    expect((await waitForTask(taskId)).status).toBe("RESOLVED");
+
+    const [bad, unknown] = toolResultsIn(anthropicServer.requestsFor(marker).at(-1)!);
+    expect(bad).toMatchObject({ name: "readFile", isError: true });
+    expect(bad.result.error).toMatch(/Invalid input for readFile: path/);
+    expect(unknown).toMatchObject({ name: "noSuchTool", isError: true, result: { error: "Unknown tool: noSuchTool" } });
+  });
+
+  it("fails the task when the model declines, and still terminates the sandbox", async () => {
+    const marker = "[loop-refusal]";
+    anthropicServer.script(marker, [{ stopReason: "refusal" }]);
+    const taskId = "loop-refusal";
+    await startTask(taskId, { prompt: `${marker} anything`, repoUrl });
+    const task = await waitForTask(taskId);
+    expect(task.status).toBe("FAILED");
+    expect(sessionFor(taskId)!.terminated).toBe(true);
   });
 
   it("fails the task when the model call fails, and still terminates the sandbox", async () => {
     const marker = "[loop-llm-error]";
-    // The AI SDK doesn't retry a 400, so the failure is immediate.
-    geminiServer.script(marker, [{ status: 400 }]);
+    // The Anthropic SDK doesn't retry a 400, so the failure is immediate.
+    anthropicServer.script(marker, [{ status: 400 }]);
     const taskId = "loop-llm-error";
     await startTask(taskId, { prompt: `${marker} anything`, repoUrl });
     const task = await waitForTask(taskId);
     expect(task.status).toBe("FAILED");
     expect(sessionFor(taskId)!.terminated).toBe(true);
+  });
+});
+
+describe("Telemetry in R2", () => {
+  /** The task's telemetry object; the key's year/month come from when it finished. */
+  async function telemetryFor(taskId: string): Promise<any> {
+    const bucket = await mf.getR2Bucket("GANTRY_BUCKET");
+    const listed = await bucket.list({ prefix: "telemetry/" });
+    const key = listed.objects.map((o) => o.key).find((k) => k.endsWith(`/${taskId}.json`));
+    expect(key).toMatch(/^telemetry\/year=\d{4}\/month=\d{2}\//);
+    return JSON.parse(await (await bucket.get(key!))!.text());
+  }
+
+  it("stores the final patch, including files the agent created", async () => {
+    const marker = "[telemetry-new-file]";
+    anthropicServer.script(marker, [
+      { toolCalls: [{ name: "writeFile", args: { path: "tests/test_new.py", content: "def test_x():\n    assert True\n" } }] },
+      { text: "Added a test." },
+    ]);
+    const taskId = "telemetry-new-file";
+    await startTask(taskId, { prompt: `${marker} add a test`, repoUrl: "https://github.com/example/telemetry" });
+    expect((await waitForTask(taskId)).status).toBe("RESOLVED");
+
+    // The final diff marks new files intent-to-add, so untracked files are in the patch.
+    expect(sessionFor(taskId)!.commands.at(-1)).toBe(DIFF_COMMAND);
+    const record = await telemetryFor(taskId);
+    expect(record).toMatchObject({ taskId, model: "claude-opus-5-5", verification: "unverified" });
+    expect(record.patch).toContain("+++ b/tests/test_new.py");
+  });
+
+  it("getDiff uses the same command, so the model sees new files too", async () => {
+    const marker = "[telemetry-getdiff]";
+    anthropicServer.script(marker, [{ toolCalls: [{ name: "getDiff", args: {} }] }, { text: "Done." }]);
+    const taskId = "telemetry-getdiff";
+    await startTask(taskId, { prompt: `${marker} diff`, repoUrl: "https://github.com/example/telemetry" });
+    await waitForTask(taskId);
+    expect(sessionFor(taskId)!.commands.filter((c) => c.includes("git diff"))).toEqual([DIFF_COMMAND, DIFF_COMMAND]);
+  });
+});
+
+describe("GANTRY_MODEL and GANTRY_EFFORT", () => {
+  it("switches the Claude model and effort, and the model is recorded in telemetry", async () => {
+    const other = new Miniflare({
+      modules: true,
+      compatibilityDate: "2026-03-01",
+      compatibilityFlags: ["nodejs_compat"],
+      script: workerScript,
+      durableObjects: { TASK_COORDINATOR: { className: "TaskCoordinator", useSQLite: true } },
+      r2Buckets: ["GANTRY_BUCKET"],
+      bindings: {
+        MODAL_SANDBOX_URL: modalServer.url,
+        AGENT_SANDBOX_TOKEN: "mock-token",
+        ANTHROPIC_API_KEY: "mock-key",
+        ANTHROPIC_BASE_URL: anthropicServer.url,
+        GANTRY_MODEL: "claude-haiku-5-5",
+        GANTRY_EFFORT: "low",
+      },
+    });
+    try {
+      const marker = "[model-override]";
+      // Straight to the Durable Object, so this test doesn't depend on the Worker's routing or auth.
+      const ns = await other.getDurableObjectNamespace("TASK_COORDINATOR");
+      const stub = ns.get(ns.idFromName("model-override"));
+      await stub.fetch("http://do/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId: "model-override", prompt: `${marker} hello` }),
+      });
+      const deadline = Date.now() + 15_000;
+      let task: any = null;
+      while (Date.now() < deadline) {
+        const res = await stub.fetch("http://do/status");
+        task = ((await res.json()) as { task: any }).task;
+        if (task?.status === "RESOLVED" || task?.status === "FAILED") break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(task.status).toBe("RESOLVED");
+      const [request] = anthropicServer.requestsFor(marker);
+      expect(request.model).toBe("claude-haiku-5-5");
+      expect(request.body.output_config).toEqual({ effort: "low" });
+      // Claude Haiku 5.5 has no server-side fallbacks, so the loop doesn't ask for them.
+      expect(request.body).not.toHaveProperty("fallbacks");
+      expect(request.beta ?? "").not.toContain("server-side-fallback");
+      const bucket = await other.getR2Bucket("GANTRY_BUCKET");
+      const { objects } = await bucket.list({ prefix: "telemetry/" });
+      const record = JSON.parse(await (await bucket.get(objects[0].key))!.text());
+      expect(record.model).toBe("claude-haiku-5-5");
+    } finally {
+      await other.dispose();
+    }
   });
 });
