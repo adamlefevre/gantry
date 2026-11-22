@@ -1,6 +1,6 @@
 # Deploying Gantry: the first live run
 
-This takes the sandbox service to Modal and the control plane to Cloudflare, then runs one real issue task on [gantry-lakehouse](https://github.com/adamlefevre/gantry-lakehouse) and checks that its diff lands in R2. It assumes the changes that add `GANTRY_API_TOKEN`, the `sandbox-service` URL label and the endpoint timeout are merged.
+This takes the sandbox service to Modal and the control plane to Cloudflare, then runs one real issue task on [gantry-lakehouse](https://github.com/adamlefevre/gantry-lakehouse) and checks that its diff lands in R2. It assumes the changes that add `GANTRY_API_TOKEN`, the `sandbox-service` URL label and the endpoint timeout, and the change that runs the agent on Claude (ADR 0005), are merged.
 
 Steps marked **(you)** need your own accounts or keys. Everything else is a command you can paste.
 
@@ -8,7 +8,7 @@ Steps marked **(you)** need your own accounts or keys. Everything else is a comm
 
 1. **(you)** Create a [Modal](https://modal.com) account.
 2. **(you)** Create a [Cloudflare](https://dash.cloudflare.com) account. Enable R2 on it (the dashboard asks once).
-3. **(you)** Create a Gemini API key in [Google AI Studio](https://aistudio.google.com/apikey).
+3. **(you)** Create an Anthropic API key in the [Claude Console](https://platform.claude.com/), under API keys, and add billing credit to its organization. The agent runs on Claude Opus 5.5 by default.
 4. Install the tools and sign in from a terminal at the repo root:
 
    ```bash
@@ -28,7 +28,7 @@ openssl rand -hex 32   # AGENT_SANDBOX_TOKEN: the Worker uses it to call the san
 openssl rand -hex 32   # GANTRY_API_TOKEN: you use it to call the Worker
 ```
 
-Paste them, and your Gemini key, into `.env`. Never commit it or paste it into an issue or PR.
+Paste them, and your Anthropic key, into `.env`. Never commit it or paste it into an issue or PR.
 
 ## 3. Sandbox service on Modal
 
@@ -52,7 +52,7 @@ cd apps/control-plane
 npx wrangler r2 bucket create gantry
 npx wrangler deploy --var MODAL_SANDBOX_URL:"$MODAL_SANDBOX_URL"
 npx wrangler secret put AGENT_SANDBOX_TOKEN            # paste the same value as in .env
-npx wrangler secret put GOOGLE_GENERATIVE_AI_API_KEY
+npx wrangler secret put ANTHROPIC_API_KEY              # your Anthropic key
 npx wrangler secret put GANTRY_API_TOKEN
 cd ../..
 ```
@@ -63,7 +63,7 @@ cd ../..
 curl -s -o /dev/null -w '%{http_code}\n' "$GANTRY_URL/api/tasks/ping/status"   # expect 401
 ```
 
-Optional: `npx wrangler secret put GANTRY_MODEL` (or `--var GANTRY_MODEL:<id>`) switches the Gemini model. The default is `gemini-2.5-flash`.
+Optional, on the deploy command: `--var GANTRY_MODEL:<id>` switches the Claude model (default `claude-opus-5-5`; any Claude 4.6 or later model works, such as `claude-sonnet-5-5`), and `--var GANTRY_EFFORT:<level>` sets how hard it thinks (`low`, `medium`, `high` (the default), `xhigh` or `max`). Like `MODAL_SANDBOX_URL`, pass them on every deploy.
 
 ## 5. The first live run
 
@@ -83,6 +83,6 @@ Nothing is pushed to gantry-lakehouse: the result is a diff in R2. Opening a PR 
 - **401 from the Worker:** `GANTRY_API_TOKEN` in `.env` doesn't match the Worker secret.
 - **`Failed to initialize Modal Sandbox` in the steps or logs:** check `MODAL_SANDBOX_URL` (passed with `--var`) and that both sides have the same `AGENT_SANDBOX_TOKEN`.
 - **`Setup command failed`:** the target repo's `.gantry.yml` setup didn't work in the sandbox image. The step's stderr is in `/api/tasks/<id>/steps`.
-- **A Gemini error:** check the key, and try another model with `GANTRY_MODEL`.
+- **An Anthropic error** (`401`, `403` or `429` in the logs): check `ANTHROPIC_API_KEY` and that its organization has credit. `The model declined to continue` means Claude refused the task, even after its fallback model tried; try a different issue.
 - **The task stays RUNNING, or stops with no telemetry:** the agent loop runs in the Durable Object's `waitUntil`, which Cloudflare can cut short on long runs. Making runs resumable is rollout step 4, slices 1, 3 and 4 (`docs/design-notes/04-rollout-step-4-plan.md`). Try a smaller issue meanwhile.
-- **Costs:** each run uses Gemini tokens and Modal sandbox time. Delete the deployments (`modal app stop agent-sandbox-service`, `npx wrangler delete`) if you stop using them.
+- **Costs:** each run uses Claude tokens and Modal sandbox time. Claude Opus 5.5 costs $4 per million input tokens and $20 per million output tokens, and the loop caches the conversation so each turn re-reads it at a tenth of that input price. `GANTRY_EFFORT:medium` or `GANTRY_MODEL:claude-sonnet-5-5` ($2 and $10) costs less. The Claude Console's usage page shows what each run spent. Delete the deployments (`modal app stop agent-sandbox-service`, `npx wrangler delete`) if you stop using them.
