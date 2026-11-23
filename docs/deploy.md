@@ -65,6 +65,8 @@ cd ../..
 curl -s -o /dev/null -w '%{http_code}\n' "$GANTRY_URL/api/tasks/ping/status"   # expect 401
 ```
 
+Gantry only checks out the repos named in `GANTRY_ALLOWED_REPOS` (comma-separated `owner/name` or `owner/*`; `wrangler.jsonc` sets `adamlefevre/gantry-lakehouse`). A task for any other repo gets a 403, and with the list empty every repo task does. Edit the list in `wrangler.jsonc`, or pass `--var GANTRY_ALLOWED_REPOS:owner/name,owner/other` on every deploy. Tasks may name a branch, tag or commit SHA, but not a `refs/...` name such as `refs/pull/1/head`, so an outsider's pull request can't run as the repo's own code.
+
 Optional, on the deploy command: `--var GANTRY_MODEL:<id>` switches the Claude model (default `claude-opus-5-5`; any Claude 4.6 or later model works, such as `claude-sonnet-5-5`), and `--var GANTRY_EFFORT:<level>` sets how hard it thinks (`low`, `medium`, `high` (the default), `xhigh` or `max`). Like `MODAL_SANDBOX_URL`, pass them on every deploy.
 
 ## 5. The first live run

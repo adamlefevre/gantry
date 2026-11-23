@@ -69,6 +69,8 @@ export interface AgentTelemetry {
   totalTokens: number;
   stepsCount: number;
   patch: string;
+  /** The commit the sandbox checked out; null with no repo, or an older sandbox service. */
+  commitSha: string | null;
   /** Whether the run can be verified: no `test:` in .gantry.yml means unverified (draft PR only). */
   verification: Verification;
   testCommand: string | null;
@@ -93,6 +95,8 @@ export interface AgentLoopOptions {
    * tasks against a candidate config; the GANTRY_MODEL and GANTRY_EFFORT overrides still apply.
    */
   agentConfig?: unknown;
+  /** Called once the sandbox is up, with the commit it checked out (null with no repo). */
+  onSession?: (session: { sandboxId: string; commit: string | null }) => void;
   /** Called once the agent config is resolved, before the sandbox starts. */
   onAgentConfig?: (resolved: ResolvedAgentConfig) => void;
   /** Called once .gantry.yml has been read, before setup runs. */
@@ -139,8 +143,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
     throw new Error(`Failed to initialize Modal Sandbox: ${await initRes.text()}`);
   }
 
-  const initData = (await initRes.json()) as { sessionId?: string; sandbox_id?: string };
+  const initData = (await initRes.json()) as { sessionId?: string; sandbox_id?: string; commit?: string | null };
   const sessionId = initData.sessionId || initData.sandbox_id || "";
+  const commitSha = typeof initData.commit === "string" ? initData.commit : null;
+  options.onSession?.({ sandboxId: sessionId, commit: commitSha });
 
   const callSandbox = async (endpoint: string, payload: Record<string, unknown>) => {
     const res = await fetch(`${env.MODAL_SANDBOX_URL}${endpoint}`, {
@@ -452,6 +458,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
       totalTokens,
       stepsCount: stepCounter,
       patch: patchRes.stdout || "",
+      commitSha,
       verification,
       testCommand: config.test ?? null,
       completedAt: new Date().toISOString()

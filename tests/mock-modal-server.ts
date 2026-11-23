@@ -22,6 +22,8 @@ export interface MockRequestLog {
 }
 
 export class MockModalServer {
+  /** The commit every repo checkout reports (the real service runs `git rev-parse HEAD`). */
+  static readonly COMMIT = "0123456789abcdef0123456789abcdef01234567";
   private server: http.Server | null = null;
   public sessions: Map<string, MockSession> = new Map();
   /** repo_url -> files in that repo's checkout (e.g. ".gantry.yml"). Unknown paths read as 404. */
@@ -78,7 +80,9 @@ export class MockModalServer {
             this.sessions.set(sessionId, session);
 
             res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ sessionId, sandbox_id: sessionId }));
+            // Like the real service: the commit it checked out, or null with no repo.
+            const commit = body.repo_url ? MockModalServer.COMMIT : null;
+            res.end(JSON.stringify({ sessionId, sandbox_id: sessionId, commit }));
             return;
           }
 

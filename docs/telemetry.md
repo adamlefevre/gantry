@@ -20,6 +20,7 @@ The factory's only link to the lakehouse ([gantry-lakehouse](https://github.com/
 | `agentConfigHash` | string | 16 hex digits identifying the config the run used, after overrides (ADR 0006). Added with ADR 0006; older records lack it. |
 | `totalTokens` | number | |
 | `stepsCount` | number | Agent loop steps used |
+| `commitSha` | string \| null | Commit the sandbox checked out; null with no repo. With `patch`, it says exactly what the diff applies to. Optional: older records lack it. |
 | `patch` | string | Final diff from the sandbox (`git add --all --intent-to-add && git diff`), so files the agent created are included |
 | `verification` | `"unverified"` \| `"pending"` | See `GLOSSARY.md` |
 | `testCommand` | string \| null | `test:` from `.gantry.yml` |

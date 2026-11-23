@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { runAgentLoop, type AgentTelemetry } from "./agent";
 import { TaskInputError } from "./github";
 import { resolveTaskInput, type TaskInput, type TaskStartBody } from "./taskInput";
+import { parseAllowlist } from "./repoPolicy";
 import type { Verification } from "./gantryConfig";
 
 export type { TaskStartBody };
@@ -10,6 +11,11 @@ export interface Env {
   TASK_COORDINATOR: DurableObjectNamespace;
   GANTRY_BUCKET?: R2Bucket;
   HYDRALAKE_BUCKET?: R2Bucket;
+  /**
+   * Comma-separated `owner/name` or `owner/*`: the repos tasks may check out. Unset or empty:
+   * every task with a repo is refused (repoPolicy.ts).
+   */
+  GANTRY_ALLOWED_REPOS?: string;
   /** Bearer token callers must send on every /api route. Unset: all /api requests are refused. */
   GANTRY_API_TOKEN?: string;
   MODAL_SANDBOX_URL: string;
@@ -36,6 +42,11 @@ export interface TaskRecord {
   ref: string | null;
   issue_number: number | null;
   issue_url: string | null;
+  /** The issue as read at start: GitHub's updated_at, and SHA-256 of its title and body. */
+  issue_updated_at: string | null;
+  issue_sha256: string | null;
+  /** The commit the sandbox checked out. Null until the sandbox is up, or with no repo. */
+  commit_sha: string | null;
   /** Null until .gantry.yml has been read. */
   verification: Verification | null;
   test_command: string | null;
@@ -108,6 +119,9 @@ export class TaskCoordinator extends DurableObject<Env> {
       ["test_command", "TEXT"],
       ["agent_config_version", "TEXT"],
       ["agent_config_hash", "TEXT"],
+      ["issue_updated_at", "TEXT"],
+      ["issue_sha256", "TEXT"],
+      ["commit_sha", "TEXT"],
     ];
     for (const [col, type] of added) {
       if (!cols.includes(col)) this.sql.exec(`ALTER TABLE tasks ADD COLUMN ${col} ${type}`);
@@ -148,10 +162,11 @@ export class TaskCoordinator extends DurableObject<Env> {
 
       let input: TaskInput;
       try {
-        input = await resolveTaskInput(body, {
-          apiUrl: this.env.GITHUB_API_URL,
-          token: this.env.GITHUB_TOKEN,
-        });
+        input = await resolveTaskInput(
+          body,
+          { apiUrl: this.env.GITHUB_API_URL, token: this.env.GITHUB_TOKEN },
+          parseAllowlist(this.env.GANTRY_ALLOWED_REPOS)
+        );
       } catch (e) {
         this.running = false;
         if (e instanceof TaskInputError) {
@@ -199,10 +214,14 @@ export class TaskCoordinator extends DurableObject<Env> {
     const { prompt, repo, issue } = input;
     const now = new Date().toISOString();
     this.sql.exec(
-      `INSERT INTO tasks (id, status, prompt, repo_url, ref, issue_number, issue_url, created_at, updated_at)
-       VALUES (?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET status='RUNNING', updated_at=?`,
-      taskId, prompt, repo?.url ?? null, repo?.ref ?? null, issue?.number ?? null, issue?.url ?? null, now, now, now
+      `INSERT INTO tasks (id, status, prompt, repo_url, ref, issue_number, issue_url, issue_updated_at, issue_sha256, created_at, updated_at)
+       VALUES (?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET status='RUNNING', prompt=excluded.prompt, repo_url=excluded.repo_url,
+         ref=excluded.ref, issue_number=excluded.issue_number, issue_url=excluded.issue_url,
+         issue_updated_at=excluded.issue_updated_at, issue_sha256=excluded.issue_sha256,
+         commit_sha=NULL, updated_at=excluded.updated_at`,
+      taskId, prompt, repo?.url ?? null, repo?.ref ?? null, issue?.number ?? null, issue?.url ?? null,
+      issue?.updatedAt ?? null, issue?.sha256 ?? null, now, now
     );
 
     this.broadcast({ type: "TASK_STARTED", taskId, prompt, repo, issue });
@@ -225,6 +244,9 @@ export class TaskCoordinator extends DurableObject<Env> {
         prompt,
         taskId,
         repo,
+        onSession: ({ commit }) => {
+          this.sql.exec(`UPDATE tasks SET commit_sha = ?, updated_at = ? WHERE id = ?`, commit, new Date().toISOString(), taskId);
+        },
         onAgentConfig: ({ version, hash }) => {
           this.sql.exec(
             `UPDATE tasks SET agent_config_version = ?, agent_config_hash = ?, updated_at = ? WHERE id = ?`,
