@@ -17,10 +17,10 @@
 | `version` | Your name for this config. Stamped on every run. |
 | `model`, `effort` | Claude model ID and effort level (`low`, `medium`, `high`, `xhigh`, `max`). |
 | `budgets.maxTurns` | Model turns per task. Setup doesn't count. |
-| `budgets.maxTotalTokens` | Stop after the turn that reaches this many tokens, cache reads included. `null` means no cap. The patch so far is kept. |
+| `budgets.maxTotalTokens` | Stop after the turn that reaches this many tokens, cache reads included. `null` means no cap. The patch so far is kept. The checked-in config caps a task at 3,000,000. |
 | `budgets.maxOutputTokensPerTurn` | `max_tokens` on each model call. Keep it at 16,000 or below unless the loop moves to streaming. |
 | `budgets.setupTimeoutSeconds`, `budgets.testTimeoutSeconds` | Limits on each `.gantry.yml` setup command and each `runTests` call. |
-| `budgets.maxCommandOutputChars` | How much of a command's output (the tail) is kept and shown to the model. |
+| `budgets.maxCommandOutputChars` | How much of a command's output (the tail) is kept and shown to the model: setup commands, `runTests` and `runCommand`. |
 | `systemPrompt.*` | Sections joined in order: `intro`, `withRepo` (only with a cloned repo), `task`, then `withTests` or `withoutTests`, then `closing`. |
 | `tools.<name>` | Offer this tool, with this description. Leave a tool out to stop offering it. |
 

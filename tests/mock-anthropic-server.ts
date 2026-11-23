@@ -25,6 +25,8 @@ export interface MockTurn {
   status?: number;
   /** Defaults to "tool_use" when the turn calls tools, else "end_turn". */
   stopReason?: string;
+  /** Wait this long before answering, to keep a task running while a test acts on it. */
+  delayMs?: number;
 }
 
 type Block = Record<string, any>;
@@ -89,6 +91,7 @@ export class MockAnthropicServer {
 
         const index = request.body.messages.filter((m) => m.role === "assistant").length;
         const turn = this.turnFor(request, index);
+        if (turn.delayMs) await new Promise((r) => setTimeout(r, turn.delayMs));
         if (turn.status) {
           return sendError(res, turn.status, "invalid_request_error", "Scripted failure");
         }

@@ -800,3 +800,59 @@ describe("GANTRY_MODEL and GANTRY_EFFORT", () => {
     }
   });
 });
+
+describe("Spend caps", () => {
+  it("returns only the tail of a long runCommand output to the model and the step log", async () => {
+    const max = agentConfigFile.budgets.maxCommandOutputChars;
+    const command = "print-a-lot";
+    modalServer.commandResults.set(command, { exit_code: 0, stdout: "x".repeat(max * 3) + "END", stderr: "" });
+    const marker = "[cap-run-command]";
+    anthropicServer.script(marker, [{ toolCalls: [{ name: "runCommand", args: { command } }] }]);
+    const taskId = "cap-run-command";
+    await startTask(taskId, { prompt: `${marker} print it` });
+    expect((await waitForTask(taskId)).status).toBe("RESOLVED");
+
+    const [result] = toolResultsIn(anthropicServer.requestsFor(marker).at(-1)!);
+    expect(result.name).toBe("runCommand");
+    expect(result.result.stdout.endsWith("END")).toBe(true);
+    expect(result.result.stdout).toMatch(/^\[\.\.\.\d+ chars truncated\]/);
+    expect(result.result.stdout.length).toBeLessThan(max + 100);
+
+    const res = await mf.dispatchFetch(`http://localhost/api/tasks/${taskId}/steps`);
+    const { steps } = (await res.json()) as { steps: any[] };
+    expect(JSON.parse(steps[0].tool_output).stdout.length).toBeLessThan(max + 100);
+  });
+
+  it("ships a token ceiling in the checked-in config", () => {
+    expect(agentConfigFile.budgets.maxTotalTokens).toBeGreaterThan(0);
+  });
+
+  it("refuses a second start while the task is running, and allows one after it finishes", async () => {
+    const marker = "[cap-busy]";
+    anthropicServer.script(marker, [{ text: "Done.", delayMs: 1500 }]);
+    const taskId = "cap-busy";
+
+    const first = await startTask(taskId, { prompt: `${marker} first` });
+    expect(first.status).toBe(200);
+    const second = await startTask(taskId, { prompt: `${marker} second` });
+    expect(second.status).toBe(409);
+    expect(((await second.json()) as { error: string }).error).toMatch(/already running/);
+
+    expect((await waitForTask(taskId)).status).toBe("RESOLVED");
+    // Only the first start reached the model.
+    expect(anthropicServer.requestsFor(marker).filter((r) => JSON.stringify(r.body.messages).includes("second"))).toHaveLength(0);
+
+    const third = await startTask(taskId, { prompt: `${marker} third` });
+    expect(third.status).toBe(200);
+    await waitForTask(taskId);
+  });
+
+  it("lets a start that failed validation be retried at once", async () => {
+    const taskId = "cap-bad-input";
+    const bad = await startTask(taskId, {});
+    expect(bad.status).toBe(400);
+    const good = await startTask(taskId, { prompt: "fine now" });
+    expect(good.status).toBe(200);
+    expect((await waitForTask(taskId)).status).toBe("RESOLVED");
+  });
+});
