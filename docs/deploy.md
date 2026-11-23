@@ -103,7 +103,7 @@ The Deploy workflow (`.github/workflows/deploy.yml`) does sections 3 and 4, and 
 
 6. **(you)** **Actions > Deploy > Run workflow**, on `main`. Leave the target at `both`. To do the first live run in the same go, put a gantry-lakehouse issue number in the issue box.
 
-The run stores `AGENT_SANDBOX_TOKEN` as the Modal secret `agent-sandbox-secret` and sets the Worker's three secrets, so GitHub is the one place to change them. It creates the R2 bucket if it's missing, deploys both services, and checks that each refuses calls without its token. Each secret reaches only the steps that use it, and the actions and the Modal CLI are pinned to exact versions (the CLI's are hash-checked, in `requirements.lock`). Its summary page shows the two URLs. Keep `GANTRY_API_TOKEN` and the Worker URL to call Gantry yourself.
+The run stores `AGENT_SANDBOX_TOKEN` as the Modal secret `agent-sandbox-secret` and sets the Worker's three secrets, so GitHub is the one place to change them. It creates the R2 bucket if it's missing, deploys both services, and checks that each refuses calls without its token. Each secret reaches only the steps that use it, and the actions and the Modal CLI are pinned to exact versions (the CLI's are hash-checked, in `requirements.lock`), npm installs skip install scripts, and Dependabot opens a PR when a pinned action has a new release. Its summary page shows the two URLs. Keep `GANTRY_API_TOKEN` and the Worker URL to call Gantry yourself.
 
 Optional variables (on the environment, or the repo's **Secrets and variables > Actions > Variables** tab): `GANTRY_MODEL` and `GANTRY_EFFORT` as in section 4, and `MODAL_SANDBOX_URL` and `GANTRY_URL` for runs that deploy only the Worker or can't read a URL from the deploy output.
 

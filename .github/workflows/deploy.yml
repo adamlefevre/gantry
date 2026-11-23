@@ -186,7 +186,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: .
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Create the R2 bucket if it doesn't exist
         env:
@@ -261,7 +261,7 @@ jobs:
           cache: "npm"
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Run one task and check its diff is in R2
         env:
