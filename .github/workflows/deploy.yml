@@ -2,7 +2,9 @@ name: Deploy
 
 # Deploys the sandbox service to Modal and the control plane to Cloudflare, and can then run the
 # first live run (scripts/smoke-task.sh). Start it from the Actions tab: Deploy > Run workflow.
-# It reads everything from repository secrets, listed in docs/deploy.md ("Deploying from GitHub").
+# Its secrets live in the "production" environment, which only main can use; docs/deploy.md
+# ("Deploying from GitHub") lists them. Each secret goes only to the steps that need it, so the
+# checkout, setup and install steps never see one, and every action and package is pinned.
 
 on:
   workflow_dispatch:
@@ -52,38 +54,49 @@ jobs:
       (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
       && github.ref == 'refs/heads/main'
       && (inputs.target || 'both') != 'worker'
+    environment: production
     outputs:
       url: ${{ steps.deploy.outputs.url }}
     env:
-      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      AGENT_SANDBOX_TOKEN: ${{ secrets.AGENT_SANDBOX_TOKEN }}
       # Modal's output is wrapped at the terminal width; keep the endpoint URL on one line.
       COLUMNS: "250"
     steps:
       - name: Check the secrets are set
+        # Only whether each one is set, never its value.
+        env:
+          HAS_MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID != '' }}
+          HAS_MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET != '' }}
+          HAS_AGENT_SANDBOX_TOKEN: ${{ secrets.AGENT_SANDBOX_TOKEN != '' }}
         run: |
           missing=()
           for name in MODAL_TOKEN_ID MODAL_TOKEN_SECRET AGENT_SANDBOX_TOKEN; do
-            [[ -n "${!name}" ]] || missing+=("$name")
+            has="HAS_$name"
+            [[ "${!has}" == "true" ]] || missing+=("$name")
           done
           if (( ${#missing[@]} )); then
-            echo "::error::Add these repository secrets first (Settings > Secrets and variables > Actions): ${missing[*]}"
+            echo "::error::Add these secrets to the production environment first (Settings > Environments > production): ${missing[*]}"
             exit 1
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.DEPLOY_SHA }}
+          # Don't leave the job's GitHub token in .git/config for later steps.
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
 
       - name: Install the Modal CLI
-        run: pip install -r requirements.txt
+        # Exact versions, checked against their hashes (requirements.lock).
+        run: pip install --require-hashes --no-deps -r requirements.lock
 
       - name: Store the sandbox token as the Modal secret agent-sandbox-secret
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          AGENT_SANDBOX_TOKEN: ${{ secrets.AGENT_SANDBOX_TOKEN }}
         run: |
           umask 077
           file="$RUNNER_TEMP/agent-sandbox-secret.json"
@@ -93,6 +106,9 @@ jobs:
 
       - name: Deploy
         id: deploy
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
           modal deploy services/execution-sandbox/service.py | tee "$RUNNER_TEMP/modal-deploy.log"
           url="$(grep -oE 'https://[A-Za-z0-9-]+--sandbox-service[A-Za-z0-9.-]*\.modal\.run' "$RUNNER_TEMP/modal-deploy.log" | head -n 1 || true)"
@@ -121,14 +137,10 @@ jobs:
       && github.ref == 'refs/heads/main'
       && (inputs.target || 'both') != 'sandbox'
       && (needs.sandbox.result == 'success' || needs.sandbox.result == 'skipped')
+    environment: production
     outputs:
       url: ${{ steps.deploy.outputs.url }}
     env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      AGENT_SANDBOX_TOKEN: ${{ secrets.AGENT_SANDBOX_TOKEN }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      GANTRY_API_TOKEN: ${{ secrets.GANTRY_API_TOKEN }}
       MODAL_SANDBOX_URL: ${{ needs.sandbox.outputs.url || vars.MODAL_SANDBOX_URL }}
       GANTRY_MODEL: ${{ vars.GANTRY_MODEL }}
       GANTRY_EFFORT: ${{ vars.GANTRY_EFFORT }}
@@ -139,13 +151,21 @@ jobs:
     steps:
       - name: Check the secrets are set
         working-directory: .
+        # Only whether each one is set, never its value.
+        env:
+          HAS_CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          HAS_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+          HAS_AGENT_SANDBOX_TOKEN: ${{ secrets.AGENT_SANDBOX_TOKEN != '' }}
+          HAS_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+          HAS_GANTRY_API_TOKEN: ${{ secrets.GANTRY_API_TOKEN != '' }}
         run: |
           missing=()
           for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID AGENT_SANDBOX_TOKEN ANTHROPIC_API_KEY GANTRY_API_TOKEN; do
-            [[ -n "${!name}" ]] || missing+=("$name")
+            has="HAS_$name"
+            [[ "${!has}" == "true" ]] || missing+=("$name")
           done
           if (( ${#missing[@]} )); then
-            echo "::error::Add these repository secrets first (Settings > Secrets and variables > Actions): ${missing[*]}"
+            echo "::error::Add these secrets to the production environment first (Settings > Environments > production): ${missing[*]}"
             exit 1
           fi
           if [[ -z "$MODAL_SANDBOX_URL" ]]; then
@@ -153,11 +173,13 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.DEPLOY_SHA }}
+          # Don't leave the job's GitHub token in .git/config for later steps.
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: "npm"
@@ -167,10 +189,16 @@ jobs:
         run: npm ci
 
       - name: Create the R2 bucket if it doesn't exist
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx wrangler r2 bucket info gantry > /dev/null 2>&1 || npx wrangler r2 bucket create gantry
 
       - name: Deploy
         id: deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           args=(--var "MODAL_SANDBOX_URL:$MODAL_SANDBOX_URL")
           [[ -n "$GANTRY_MODEL" ]] && args+=(--var "GANTRY_MODEL:$GANTRY_MODEL")
@@ -183,6 +211,12 @@ jobs:
           fi
 
       - name: Set the Worker's secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          AGENT_SANDBOX_TOKEN: ${{ secrets.AGENT_SANDBOX_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GANTRY_API_TOKEN: ${{ secrets.GANTRY_API_TOKEN }}
         run: |
           umask 077
           file="$RUNNER_TEMP/worker-secrets.json"
@@ -203,11 +237,9 @@ jobs:
     needs: worker
     if: always() && needs.worker.result == 'success' && inputs.smoke_issue != ''
     timeout-minutes: 40
+    environment: production
     env:
       GANTRY_URL: ${{ needs.worker.outputs.url || vars.GANTRY_URL }}
-      GANTRY_API_TOKEN: ${{ secrets.GANTRY_API_TOKEN }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       SMOKE_REPO: ${{ inputs.smoke_repo }}
       SMOKE_ISSUE: ${{ inputs.smoke_issue }}
     steps:
@@ -217,11 +249,13 @@ jobs:
           [[ "$SMOKE_ISSUE" =~ ^[0-9]+$ ]] || { echo "::error::The issue must be a number."; exit 1; }
           [[ "$SMOKE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::The repo must look like owner/name."; exit 1; }
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.DEPLOY_SHA }}
+          # Don't leave the job's GitHub token in .git/config for later steps.
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: "npm"
@@ -230,4 +264,8 @@ jobs:
         run: npm ci
 
       - name: Run one task and check its diff is in R2
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GANTRY_API_TOKEN: ${{ secrets.GANTRY_API_TOKEN }}
         run: ./scripts/smoke-task.sh "$SMOKE_REPO" "$SMOKE_ISSUE"
