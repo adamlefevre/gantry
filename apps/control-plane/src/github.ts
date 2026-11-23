@@ -18,6 +18,8 @@ export interface ResolvedIssue extends IssueRef {
   url: string;
   /** Clone URL for the sandbox. */
   repoUrl: string;
+  /** GitHub's `updated_at`: changes when the issue is edited. */
+  updatedAt: string | null;
 }
 
 export interface GitHubClientOptions {
@@ -101,6 +103,7 @@ export async function fetchIssue(ref: IssueRef, opts: GitHubClientOptions = {}):
     title?: unknown;
     body?: unknown;
     html_url?: unknown;
+    updated_at?: unknown;
     pull_request?: unknown;
   };
   if (data.pull_request) {
@@ -113,6 +116,7 @@ export async function fetchIssue(ref: IssueRef, opts: GitHubClientOptions = {}):
     body: typeof data.body === "string" ? data.body : "",
     url: typeof data.html_url === "string" ? data.html_url : `https://github.com/${ref.owner}/${ref.repo}/issues/${ref.number}`,
     repoUrl: `https://github.com/${ref.owner}/${ref.repo}`,
+    updatedAt: typeof data.updated_at === "string" ? data.updated_at : null,
   };
 }
 

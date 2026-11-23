@@ -57,6 +57,7 @@ beforeAll(async () => {
       ANTHROPIC_BASE_URL: anthropicServer.url,
       GITHUB_API_URL: githubServer.url,
       GANTRY_API_TOKEN: API_TOKEN,
+      GANTRY_ALLOWED_REPOS: "example/*, octo/widgets",
     },
   });
 
@@ -854,5 +855,71 @@ describe("Spend caps", () => {
     const good = await startTask(taskId, { prompt: "fine now" });
     expect(good.status).toBe(200);
     expect((await waitForTask(taskId)).status).toBe("RESOLVED");
+  });
+});
+
+describe("Repo allowlist and provenance", () => {
+  beforeAll(() => {
+    githubServer.issues.set("octo/widgets#21", {
+      number: 21,
+      title: "Provenance",
+      body: "Record what the run saw.",
+      html_url: "https://github.com/octo/widgets/issues/21",
+      updated_at: "2026-11-20T10:00:00Z",
+    });
+  });
+
+  async function sessionCreates(taskId: string) {
+    return modalServer.requests.filter((r) => r.endpoint === "/session/create" && r.body.taskId === taskId);
+  }
+
+  it("refuses a repo that isn't on the allowlist, before any sandbox or task exists", async () => {
+    const res = await startTask("allow-001", { prompt: "x", repoUrl: "https://github.com/stranger/repo" });
+    expect(res.status).toBe(403);
+    expect(await sessionCreates("allow-001")).toEqual([]);
+    const status = await mf.dispatchFetch(`http://localhost/api/tasks/allow-001/status`);
+    expect(((await status.json()) as { task: any }).task ?? null).toBeNull();
+  });
+
+  it("refuses an issue in a repo that isn't on the allowlist without reading it", async () => {
+    const before = githubServer.requests.length;
+    const res = await startTask("allow-002", { repo: "stranger/repo", issue: 1 });
+    expect(res.status).toBe(403);
+    expect(githubServer.requests.length).toBe(before);
+  });
+
+  it("refuses repo URLs that aren't github.com/owner/name", async () => {
+    for (const repoUrl of ["https://gitlab.com/example/widgets", "https://github.com/example/widgets/tree/main"]) {
+      expect((await startTask("allow-003", { prompt: "x", repoUrl })).status).toBe(400);
+    }
+  });
+
+  it("refuses a pull request ref", async () => {
+    const res = await startTask("allow-004", { prompt: "x", repoUrl: "https://github.com/example/widgets", ref: "refs/pull/1/head" });
+    expect(res.status).toBe(400);
+  });
+
+  it("stores the issue as it was read and the commit the sandbox checked out", async () => {
+    const taskId = "provenance-001";
+    expect((await startTask(taskId, { repo: "octo/widgets", issue: 21 })).status).toBe(200);
+    const task = await waitForTask(taskId);
+    expect(task.status).toBe("RESOLVED");
+    expect(task.issue_updated_at).toBe("2026-11-20T10:00:00Z");
+    expect(task.issue_sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(task.commit_sha).toBe(MockModalServer.COMMIT);
+
+    const bucket = await mf.getR2Bucket("GANTRY_BUCKET");
+    const listed = await bucket.list({ prefix: "telemetry/" });
+    const key = listed.objects.map((o) => o.key).find((k) => k.endsWith(`/${taskId}.json`));
+    const record = JSON.parse(await (await bucket.get(key!))!.text());
+    expect(record.commitSha).toBe(MockModalServer.COMMIT);
+  });
+
+  it("records no commit for a task with no repo", async () => {
+    const task = await (async () => {
+      await startTask("provenance-002", { prompt: "hello" });
+      return waitForTask("provenance-002");
+    })();
+    expect(task.commit_sha).toBeNull();
   });
 });

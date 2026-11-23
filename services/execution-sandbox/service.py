@@ -26,10 +26,17 @@ sandbox_image = (
 # The target repo is checked out here, and every command runs from here.
 WORKDIR = "/workspace"
 
-# Only public HTTPS URLs for now. Private repos get a read-only GitHub App token later (ADR 0001).
-REPO_URL_RE = re.compile(r"^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+$")
+# Only public GitHub repos for now. Private repos get a read-only GitHub App token later (ADR 0001).
+# The control plane checks the repo against GANTRY_ALLOWED_REPOS; this is the second fence.
+REPO_URL_RE = re.compile(r"^https://github\.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+?(\.git)?/?$")
 # A branch, tag, or commit SHA. Must not start with "-", so git can't read it as an option.
 REF_RE = re.compile(r"^[A-Za-z0-9._/][A-Za-z0-9._/-]*$")
+
+
+def ref_is_allowed(ref: str) -> bool:
+    # No full ref names: refs/pull/N/head is an outsider's pull request, fetched as if it were
+    # the repo's own code.
+    return bool(REF_RE.match(ref)) and len(ref) <= 255 and ".." not in ref and not ref.lower().startswith("refs/")
 
 web_app = FastAPI()
 # Injected at runtime from the Modal secret "agent-sandbox-secret". No default:
@@ -111,8 +118,8 @@ def create_session(req: CreateSessionRequest | None = None, authorization: str =
     verify_auth(authorization)
     req = req or CreateSessionRequest()
     if req.repo_url is not None and not REPO_URL_RE.match(req.repo_url):
-        raise HTTPException(status_code=422, detail="repo_url must be a public https:// git URL")
-    if not REF_RE.match(req.ref):
+        raise HTTPException(status_code=422, detail="repo_url must be https://github.com/owner/name")
+    if not ref_is_allowed(req.ref):
         raise HTTPException(status_code=422, detail="invalid ref")
 
     # No app=: inside the deployed endpoint, Modal attaches the sandbox to this app's container.

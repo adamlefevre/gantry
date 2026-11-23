@@ -63,6 +63,18 @@ def test_rejects_non_https_repo_urls(client, auth):
     assert FakeSandbox.created == []
 
 
+def test_rejects_repos_not_on_github(client, auth):
+    for url in ["https://gitlab.com/a/b", "https://github.com.evil.example/a/b", "https://github.com/a/b/c"]:
+        assert create(client, auth, repo_url=url).status_code == 422
+    assert FakeSandbox.created == []
+
+
+def test_rejects_full_ref_names_like_pull_request_heads(client, auth):
+    for ref in ["refs/pull/1/head", "REFS/heads/main", "main/../../x"]:
+        assert create(client, auth, repo_url="https://github.com/a/b", ref=ref).status_code == 422
+    assert FakeSandbox.created == []
+
+
 def test_rejects_a_ref_that_looks_like_a_git_option(client, auth):
     res = create(client, auth, repo_url="https://github.com/a/b", ref="--upload-pack=evil")
     assert res.status_code == 422
