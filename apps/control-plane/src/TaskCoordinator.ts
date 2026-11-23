@@ -59,6 +59,13 @@ export interface StepRecord {
 
 export class TaskCoordinator extends DurableObject<Env> {
   private sql: SqlStorage;
+  /**
+   * True while this instance is starting or running the task's agent loop. A second /start in
+   * that window gets 409, so one task ID can't run two loops and two sandboxes at once. It's in
+   * memory on purpose: if Cloudflare restarts the object mid-run, the task row stays RUNNING
+   * but the flag is gone, so the stuck task can be started again.
+   */
+  private running = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -133,6 +140,12 @@ export class TaskCoordinator extends DurableObject<Env> {
         taskId = match ? match[1] : `task_${Date.now()}`;
       }
 
+      if (this.running) {
+        return Response.json({ error: `task ${taskId} is already running` }, { status: 409 });
+      }
+      // Claimed before the first await, so two starts that arrive together can't both pass.
+      this.running = true;
+
       let input: TaskInput;
       try {
         input = await resolveTaskInput(body, {
@@ -140,6 +153,7 @@ export class TaskCoordinator extends DurableObject<Env> {
           token: this.env.GITHUB_TOKEN,
         });
       } catch (e) {
+        this.running = false;
         if (e instanceof TaskInputError) {
           return Response.json({ error: e.message }, { status: e.status });
         }
@@ -273,6 +287,7 @@ export class TaskCoordinator extends DurableObject<Env> {
       }
 
       this.broadcast({ type: "TASK_FINISHED", taskId, status: finalStatus });
+      this.running = false;
     }
   }
 

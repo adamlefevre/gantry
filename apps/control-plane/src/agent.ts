@@ -236,9 +236,16 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentTele
         },
         schema: z.object({ command: z.string() }),
         run: async ({ command }: { command: string }) => {
-          const data = await callSandbox("/exec", { command });
-          onStep({ stepIndex: ++stepCounter, toolName: "runCommand", input: { command }, output: data });
-          return data;
+          const data = (await callSandbox("/exec", { command })) as ExecResult;
+          // Only the tail goes back: the whole transcript is re-sent every turn, so one huge
+          // output would be paid for again on every later turn.
+          const output = {
+            exit_code: data.exit_code,
+            stdout: tail(data.stdout, budgets.maxCommandOutputChars),
+            stderr: tail(data.stderr, budgets.maxCommandOutputChars)
+          };
+          onStep({ stepIndex: ++stepCounter, toolName: "runCommand", input: { command }, output });
+          return output;
         }
       },
       {
