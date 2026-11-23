@@ -90,7 +90,7 @@ The Deploy workflow (`.github/workflows/deploy.yml`) does sections 3 and 4, and 
 2. **(you)** On Cloudflare's dashboard: **My Profile > API Tokens > Create Token**, with the **Edit Cloudflare Workers** template. Make sure it includes **Workers R2 Storage: Edit**, and add it if not. Also copy your **Account ID** from the account's home page.
 3. **(you)** Get an Anthropic API key as in section 1.
 4. **(you)** Make two long random tokens for `AGENT_SANDBOX_TOKEN` and `GANTRY_API_TOKEN`. A 40-character password from a password manager works.
-5. **(you)** On GitHub: the repo's **Settings > Secrets and variables > Actions > New repository secret**. Add each of these:
+5. **(you)** On GitHub, in the repo's **Settings > Environments**, create an environment named `production`. Under **Deployment branches and tags**, choose **Selected branches and tags** and add `main`, so no other branch can use its secrets. Then, under **Environment secrets**, add each of these (not as repository secrets, which every workflow and branch could read):
 
    | Secret | Value |
    |---|---|
@@ -99,11 +99,13 @@ The Deploy workflow (`.github/workflows/deploy.yml`) does sections 3 and 4, and 
    | `ANTHROPIC_API_KEY` | your Anthropic key |
    | `AGENT_SANDBOX_TOKEN`, `GANTRY_API_TOKEN` | the two tokens from step 4 |
 
+   A secret set in another repo doesn't carry over, and GitHub never shows a saved value again, so use the values you kept, or make new ones.
+
 6. **(you)** **Actions > Deploy > Run workflow**, on `main`. Leave the target at `both`. To do the first live run in the same go, put a gantry-lakehouse issue number in the issue box.
 
-The run stores `AGENT_SANDBOX_TOKEN` as the Modal secret `agent-sandbox-secret` and sets the Worker's three secrets, so GitHub is the one place to change them. It creates the R2 bucket if it's missing, deploys both services, and checks that each refuses calls without its token. Its summary page shows the two URLs. Keep `GANTRY_API_TOKEN` and the Worker URL to call Gantry yourself.
+The run stores `AGENT_SANDBOX_TOKEN` as the Modal secret `agent-sandbox-secret` and sets the Worker's three secrets, so GitHub is the one place to change them. It creates the R2 bucket if it's missing, deploys both services, and checks that each refuses calls without its token. Each secret reaches only the steps that use it, and the actions and the Modal CLI are pinned to exact versions (the CLI's are hash-checked, in `requirements.lock`). Its summary page shows the two URLs. Keep `GANTRY_API_TOKEN` and the Worker URL to call Gantry yourself.
 
-Optional repository variables (the **Variables** tab, beside Secrets): `GANTRY_MODEL` and `GANTRY_EFFORT` as in section 4, and `MODAL_SANDBOX_URL` and `GANTRY_URL` for runs that deploy only the Worker or can't read a URL from the deploy output.
+Optional variables (on the environment, or the repo's **Secrets and variables > Actions > Variables** tab): `GANTRY_MODEL` and `GANTRY_EFFORT` as in section 4, and `MODAL_SANDBOX_URL` and `GANTRY_URL` for runs that deploy only the Worker or can't read a URL from the deploy output.
 
 To deploy automatically after every merge to `main` whose CI passes, uncomment the four `workflow_run` lines at the top of the workflow.
 
