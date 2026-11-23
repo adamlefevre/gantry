@@ -97,13 +97,16 @@ The Deploy workflow (`.github/workflows/deploy.yml`) does sections 3 and 4, and 
    | `ANTHROPIC_API_KEY` | your Anthropic key |
    | `AGENT_SANDBOX_TOKEN`, `GANTRY_API_TOKEN` | the two tokens from step 4 |
 
-6. **(you)** **Actions > Deploy > Run workflow**, on `main`. Leave the target at `both`. To do the first live run in the same go, put a gantry-lakehouse issue number in the issue box.
+6. **(you)** Recommended: put the secrets behind an approval. On GitHub: **Settings > Environments > New environment**, named `production`. Under **Deployment protection rules**, tick **Required reviewers** and add yourself; under **Deployment branches and tags**, choose **Selected branches and tags** and add `main`. Then add the seven secrets from step 5 to this environment instead, and delete the repository-level copies. Repository secrets are readable by any workflow on any branch; environment secrets only by jobs that you approve, from `main`. Each deploy then asks you to approve its jobs before they start.
+7. **(you)** **Actions > Deploy > Run workflow**, on `main`. Leave the target at `both`. To do the first live run in the same go, put a gantry-lakehouse issue number in the issue box.
 
 The run stores `AGENT_SANDBOX_TOKEN` as the Modal secret `agent-sandbox-secret` and sets the Worker's three secrets, so GitHub is the one place to change them. It creates the R2 bucket if it's missing, deploys both services, and checks that each refuses calls without its token. Its summary page shows the two URLs. Keep `GANTRY_API_TOKEN` and the Worker URL to call Gantry yourself.
 
 Optional repository variables (the **Variables** tab, beside Secrets): `GANTRY_MODEL` and `GANTRY_EFFORT` as in section 4, and `MODAL_SANDBOX_URL` and `GANTRY_URL` for runs that deploy only the Worker or can't read a URL from the deploy output.
 
 To deploy automatically after every merge to `main` whose CI passes, uncomment the four `workflow_run` lines at the top of the workflow.
+
+The workflow gives each secret only to the steps that use it, so `pip install` and `npm ci` run without them. It installs the Modal CLI from `requirements.lock`, which pins every package with a hash. After changing `requirements.txt`, regenerate it with `uv pip compile requirements.txt --universal --python-version 3.11 --generate-hashes --no-header -o requirements.lock`. Its Actions are pinned to commit SHAs, and Dependabot (`.github/dependabot.yml`) proposes updates.
 
 If you also deploy from a terminal, keep the tokens in `.env` the same as the GitHub secrets, because each deploy from GitHub overwrites the Modal and Worker secrets.
 
