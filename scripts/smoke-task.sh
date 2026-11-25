@@ -31,7 +31,11 @@ api() {
 json() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const v=new Function("o","return "+process.argv[1])(JSON.parse(s));console.log(v??"")})' "$1"; }
 
 echo "Starting ${task_id}: ${repo}#${issue}"
-api POST start -H "Content-Type: application/json" -d "{\"repo\":\"${repo}\",\"issue\":${issue}}" >/dev/null
+# On an error, --fail-with-body still prints the Worker's message, so show it rather than discard it.
+if ! started="$(api POST start -H "Content-Type: application/json" -d "{\"repo\":\"${repo}\",\"issue\":${issue}}")"; then
+  echo "The Worker refused the task: ${started:-no message}" >&2
+  exit 1
+fi
 
 deadline=$((SECONDS + timeout_seconds))
 status=""
