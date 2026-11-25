@@ -217,10 +217,14 @@ jobs:
           AGENT_SANDBOX_TOKEN: ${{ secrets.AGENT_SANDBOX_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GANTRY_API_TOKEN: ${{ secrets.GANTRY_API_TOKEN }}
+          # Optional: a read-only GitHub token the Worker uses to fetch issues. Without one it calls
+          # GitHub unauthenticated, which shares Cloudflare's IPs and often hits the rate limit (503).
+          # GitHub reserves secret names that start with GITHUB_, hence the GANTRY_ prefix.
+          GANTRY_GITHUB_TOKEN: ${{ secrets.GANTRY_GITHUB_TOKEN }}
         run: |
           umask 077
           file="$RUNNER_TEMP/worker-secrets.json"
-          node -e 'const e = process.env; console.log(JSON.stringify({AGENT_SANDBOX_TOKEN: e.AGENT_SANDBOX_TOKEN, ANTHROPIC_API_KEY: e.ANTHROPIC_API_KEY, GANTRY_API_TOKEN: e.GANTRY_API_TOKEN}))' > "$file"
+          node -e 'const e = process.env; const s = {AGENT_SANDBOX_TOKEN: e.AGENT_SANDBOX_TOKEN, ANTHROPIC_API_KEY: e.ANTHROPIC_API_KEY, GANTRY_API_TOKEN: e.GANTRY_API_TOKEN}; if (e.GANTRY_GITHUB_TOKEN) s.GITHUB_TOKEN = e.GANTRY_GITHUB_TOKEN; console.log(JSON.stringify(s))' > "$file"
           npx wrangler secret bulk "$file"
           rm -f "$file"
 
